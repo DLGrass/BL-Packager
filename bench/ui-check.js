@@ -5,6 +5,7 @@
 //   node bench/ui-check.js                                   # out/bench/bench.sb3, HTML
 //   node bench/ui-check.js --target exe                      # the exe resource path
 //   node bench/ui-check.js --sb3 out/bench/bench.sb3 --shot out/ui.png
+//   node bench/ui-check.js --theme dark --shot out/ui-dark.png
 //
 // test/run.js covers the HTTP API but stops at the socket: it cannot tell
 // whether the page's own wiring works — the drop handler, the option plumbing,
@@ -131,6 +132,7 @@ const waitForTarget = async (port, expectedUrl, timeoutMs = 20000) => {
 const main = async () => {
   const sb3Path = path.resolve(arg('--sb3', path.join(ROOT, 'out', 'bench', 'bench.sb3')));
   const shotPath = arg('--shot', null);
+  const theme = arg('--theme', null);
   const target = arg('--target', 'html') === 'exe' ? 'exe' : 'html';
   if (!fs.existsSync(sb3Path)) {
     throw new Error(`${sb3Path} not found — run: node bench/make-project.js`);
@@ -180,6 +182,22 @@ const main = async () => {
     cdp = await connect(pageTarget.webSocketDebuggerUrl);
     await cdp.send('Runtime.enable');
     await cdp.send('DOM.enable');
+
+    if (theme === 'light' || theme === 'dark') {
+      // The page picks its theme from <head>, before the first paint, so it has
+      // to be seeded before a load — poking the attribute in afterwards would
+      // not tell us whether the boot path works. This drives the same
+      // localStorage key the footer's theme selector writes.
+      await cdp.send('Page.enable');
+      await cdp.evaluate(`localStorage.setItem('BLPackager.theme', ${JSON.stringify(theme)})`);
+      await cdp.send('Page.reload');
+      await sleep(400);
+      const applied = await cdp.evaluate(`document.documentElement.getAttribute('theme')`);
+      if (applied !== theme) throw new Error(`asked for the ${theme} theme, page booted as ${applied}`);
+      const accent = await cdp.evaluate(
+        `getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()`);
+      console.log(`theme       ${applied} (--accent ${accent})`);
+    }
 
     const ready = Date.now() + 15000;
     while (Date.now() < ready) {

@@ -5,21 +5,24 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BL Packager - 把 Scratch 作品打包成 HTML 和 EXE</title>
 <meta name="description" content="把 Scratch 作品打包成单文件 HTML 或 Windows 可执行文件。零依赖，全程在本机运行。">
+<meta name="theme-color" content="#75c1c4">
 <style>
-  /* Palette and geometry follow TurboWarp/packager's src/p4 UI: a centred
-     column of 625px cards, a 6px accent bar on top of the noteworthy ones, and
-     flat Material-ish buttons. The accent hue is ours; everything else — the
-     card metrics, the control shapes, the type scale — is deliberately the
-     same, so the two packagers read as the same kind of tool. */
+  /* Geometry follows TurboWarp/packager's src/p4 UI: a centred column of 625px
+     cards, a 6px accent bar on top of the noteworthy ones, and flat
+     Material-ish buttons. The palette is Bilup's, not TurboWarp's. */
   :root {
-    --accent: #6c8cff;
-    --blue: #4C97FF;
+    /* Bilup brand teal. It is a light hue, so anything that sits ON it
+       (button labels) uses --accent-ink rather than white: white on #75c1c4 is
+       only 2.1:1, an ink of the same hue gets 6.8:1. The bar, the focus ring
+       and the native control tint take the colour undiluted. */
+    --accent: #75c1c4;
+    --accent-ink: #0d2e2f;
     --green: #0FBD8C;
     --orange: #FF8C1A;
     --bg: #fff;
     --fg: #000;
     --card: #fff;
-    --link: blue;
+    --link: #1f7a7e;
     --muted: rgba(0, 0, 0, .55);
     --input-bg: #fff;
     --input-fg: #000;
@@ -32,7 +35,7 @@
     --bg: #111;
     --fg: #eee;
     --card: #222;
-    --link: #56b2ff;
+    --link: #7fd0d3;
     --muted: rgba(238, 238, 238, .6);
     --input-bg: #333;
     --input-fg: #fff;
@@ -107,7 +110,7 @@
   input[type="number"] { width: 60px; }
   input[type="number"].wider { width: 72px; }
   input[type="file"] { color: inherit; font-family: inherit; }
-  input[type="radio"], input[type="checkbox"] { accent-color: var(--blue); }
+  input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   input:invalid { outline: 2px solid red; }
   summary { cursor: pointer; }
 
@@ -128,7 +131,7 @@
     position: relative;
     font-family: inherit;
     font-size: 14px;
-    color: #fff;
+    color: var(--accent-ink);
     background-color: var(--accent);
     border: none;
     padding: .5rem 1rem;
@@ -138,8 +141,10 @@
     cursor: pointer;
     font-weight: bold;
   }
-  button.secondary { background-color: var(--green); }
-  button.dangerous { background-color: var(--orange); }
+  /* The green and orange are saturated enough to carry white; the brand teal is
+     not, so only those two override the ink. */
+  button.secondary { background-color: var(--green); color: #fff; }
+  button.dangerous { background-color: var(--orange); color: #fff; }
   button:active .dimmer, button:hover .dimmer { display: block; }
   button:disabled { opacity: .45; cursor: not-allowed; }
   button:disabled .dimmer { display: none; }
@@ -226,7 +231,7 @@
     <div id="healthBody"></div>
   </section>
 
-  <section class="card" id="selectCard" style="border-top:6px solid var(--blue)">
+  <section class="card" id="selectCard" style="border-top:6px solid var(--accent)">
     <h2>选择作品</h2>
     <p>选择一个 <code>.sb3</code> 作品文件，也可以直接把它拖到这张卡片上。</p>
 
@@ -595,7 +600,7 @@ const selectCard = $('selectCard');
 for (const type of ['dragenter', 'dragover']) {
   selectCard.addEventListener(type, (e) => {
     e.preventDefault();
-    selectCard.style.outline = '2px dashed var(--blue)';
+    selectCard.style.outline = '2px dashed var(--accent)';
   });
 }
 for (const type of ['dragleave', 'drop']) {

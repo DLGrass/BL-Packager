@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BL Packager - 把 Scratch 作品打包成 HTML 和 EXE</title>
+<meta name="description" content="把 Scratch 作品打包成单文件 HTML 或 Windows 可执行文件。零依赖，全程在本机运行。">
+<style>
+  /* Palette and geometry follow TurboWarp/packager's src/p4 UI: a centred
+     column of 625px cards, a 6px accent bar on top of the noteworthy ones, and
+     flat Material-ish buttons. The accent hue is ours; everything else — the
+     card metrics, the control shapes, the type scale — is deliberately the
+     same, so the two packagers read as the same kind of tool. */
+  :root {
+    --accent: #6c8cff;
+    --blue: #4C97FF;
+    --green: #0FBD8C;
+    --orange: #FF8C1A;
+    --bg: #fff;
+    --fg: #000;
+    --card: #fff;
+    --link: blue;
+    --muted: rgba(0, 0, 0, .55);
+    --input-bg: #fff;
+    --input-fg: #000;
+    --input-border: rgb(160, 160, 160);
+    --input-border-hover: rgb(30, 30, 30);
+    --code-bg: rgba(0, 0, 0, .06);
+    --shadow: 0 2px .5em .1em rgba(0, 0, 0, .2);
+  }
+  [theme="dark"] {
+    --bg: #111;
+    --fg: #eee;
+    --card: #222;
+    --link: #56b2ff;
+    --muted: rgba(238, 238, 238, .6);
+    --input-bg: #333;
+    --input-fg: #fff;
+    --input-border: #888;
+    --input-border-hover: #bbb;
+    --code-bg: rgba(255, 255, 255, .12);
+    --shadow: 0 2px .5em .1em rgba(0, 0, 0, .55);
+    color-scheme: dark;
+  }
+
+  html, body { margin: 0; }
+  :root {
+    font-family: "Helvetica Neue", Helvetica, Arial, "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  main { padding-bottom: 10px; }
+
+  a { color: var(--link); }
+  a:active { color: red; }
+
+  p, h1, h2, h3 { margin: 12px 0; }
+  h1 { font-size: 1.6em; }
+  h2 { font-size: 1.2em; }
+  h3 { font-size: 1em; opacity: .9; margin-bottom: 4px; }
+  .group:last-child, .option:last-child, p:last-child { margin-bottom: 0; }
+
+  code {
+    background: var(--code-bg);
+    border-radius: 2px;
+    padding: 0 3px;
+    font: .92em ui-monospace, Consolas, monospace;
+  }
+  .muted { color: var(--muted); font-size: smaller; }
+  .disclaimer { font-style: italic; }
+  .version { font-size: small; opacity: .8; }
+  .ok { color: var(--green); }
+  .bad { color: #d33; }
+  [theme="dark"] .bad { color: #ff8c8c; }
+  .hidden { display: none !important; }
+
+  /* cards ---------------------------------------------------------------- */
+  .card {
+    max-width: 625px;
+    margin: 1em auto;
+    border-radius: .3em;
+    background-color: var(--card);
+    padding: 1em;
+    box-shadow: var(--shadow);
+  }
+  .card.caption { font-style: italic; color: var(--fg); }
+  .card.center {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 40px;
+    text-align: center;
+  }
+
+  /* controls ------------------------------------------------------------- */
+  input[type="text"], input[type="number"], textarea { padding: 2px; }
+  input[type="text"], input[type="number"], textarea, select {
+    background-color: var(--input-bg);
+    color: var(--input-fg);
+    border: 1px solid var(--input-border);
+    border-radius: 2px;
+    font-family: inherit;
+  }
+  select:hover { border-color: var(--input-border-hover); }
+  input[type="text"] { width: 200px; }
+  input[type="text"].shorter { width: 150px; }
+  input[type="number"] { width: 60px; }
+  input[type="number"].wider { width: 72px; }
+  input[type="file"] { color: inherit; font-family: inherit; }
+  input[type="radio"], input[type="checkbox"] { accent-color: var(--blue); }
+  input:invalid { outline: 2px solid red; }
+  summary { cursor: pointer; }
+
+  .options { margin: 12px 0; }
+  .option {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 4px 0;
+    min-height: 25px;
+  }
+  .option > label { margin-right: 2px; }
+  .group { margin: 14px 0; }
+
+  /* buttons: primary / secondary / dangerous, as in the upstream Button */
+  button {
+    position: relative;
+    font-family: inherit;
+    font-size: 14px;
+    color: #fff;
+    background-color: var(--accent);
+    border: none;
+    padding: .5rem 1rem;
+    margin: 0;
+    border-radius: 4px;
+    overflow: hidden;
+    cursor: pointer;
+    font-weight: bold;
+  }
+  button.secondary { background-color: var(--green); }
+  button.dangerous { background-color: var(--orange); }
+  button:active .dimmer, button:hover .dimmer { display: block; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button:disabled .dimmer { display: none; }
+  .dimmer {
+    display: none;
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background-color: rgba(0, 0, 0, .25);
+  }
+  .text {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    z-index: 10;
+  }
+  .buttons { display: flex; flex-wrap: wrap; align-items: center; }
+  .buttons > .button { margin-right: 4px; }
+  .side-buttons { display: flex; margin-left: auto; }
+
+  .warning {
+    font-weight: bold;
+    background: yellow;
+    color: black;
+    padding: 10px;
+    border-radius: 10px;
+  }
+  .card.error { border: 2px solid #ff4c4c; }
+
+  /* results -------------------------------------------------------------- */
+  .headline { font-size: 1.05em; margin: 8px 0; }
+  .headline b { font-size: 1.25em; }
+  dl.stats {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 4px 12px;
+    margin: 8px 0 0;
+  }
+  dl.stats dt { color: var(--muted); font-size: smaller; padding-top: 1px; }
+  dl.stats dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+  pre.log {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 10px;
+    overflow: auto;
+    max-height: 260px;
+    font: 12px/1.5 ui-monospace, Consolas, monospace;
+    white-space: pre-wrap;
+  }
+  .downloads p { margin: 6px 0; }
+
+  footer { text-align: center; padding-bottom: 24px; }
+  footer > div { margin-top: 12px; }
+</style>
+<script>
+  // Same trick as the upstream template: resolve the theme before the first
+  // paint so a dark-mode user never sees a white flash.
+  (function () {
+    var theme = 'system';
+    try {
+      var stored = localStorage.getItem('BLPackager.theme');
+      if (typeof stored === 'string') theme = stored;
+    } catch (e) { /* private mode */ }
+    if (theme === 'system') {
+      theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('theme', theme);
+  })();
+</script>
+</head>
+<body>
+<main id="main">
+
+  <section class="card" style="border-top:6px solid var(--accent)">
+    <h1>BL Packager</h1>
+    <p class="version" id="versionLine">本地打包器</p>
+    <p>把 Scratch 3 作品打包成<strong>单文件 HTML</strong>，或带 WebView2 宿主的 <strong>Windows 可执行文件</strong>。</p>
+    <p>打包全程在 <code>127.0.0.1</code> 上的本进程里完成，作品不会离开这台电脑，也不需要任何联网功能。</p>
+    <p class="disclaimer">本项目与 Scratch、Scratch 团队、Scratch 基金会无关。</p>
+  </section>
+
+  <section class="card hidden" id="healthCard">
+    <div id="healthBody"></div>
+  </section>
+
+  <section class="card" id="selectCard" style="border-top:6px solid var(--blue)">
+    <h2>选择作品</h2>
+    <p>选择一个 <code>.sb3</code> 作品文件，也可以直接把它拖到这张卡片上。</p>
+
+    <div class="options">
+      <div class="option">
+        <label for="fileInput">作品文件</label>
+        <input type="file" id="fileInput" accept=".sb3,.sb2,.sb,application/zip">
+      </div>
+    </div>
+    <p class="muted" id="dropTitle">尚未选择文件</p>
+
+    <p class="muted">上游 TurboWarp 打包器还可以用「Scratch 作品 ID」或「其他 URL」导入。本机版为了不联网，
+      只保留从磁盘读取这一种方式。</p>
+
+    <div class="buttons">
+      <button class="button" id="loadBtn" disabled><div class="dimmer"></div><div class="text">载入作品</div></button>
+    </div>
+  </section>
+
+  <section class="card caption" id="loadHint">
+    <p>载入作品之后才能配置打包选项。</p>
+  </section>
+
+  <section class="card hidden" id="projectCard">
+    <h2>作品</h2>
+    <dl class="stats" id="projectStats"></dl>
+  </section>
+
+  <div id="optionsRoot" class="hidden">
+
+    <section class="card">
+      <h2>运行时选项</h2>
+      <div class="option">
+        <label><input type="checkbox" id="turbo"> Turbo 模式</label>
+      </div>
+      <div class="option">
+        <label for="framerate">帧率</label>
+        <input type="number" id="framerate" value="30" min="0" max="240">
+        <span class="muted">0 = 不限制</span>
+      </div>
+      <div class="option">
+        <label for="username">用户名</label>
+        <input type="text" class="shorter" id="username" value="player####">
+        <span class="muted">给「用户名」积木使用，<code>#</code> 会替换成随机数字</span>
+      </div>
+      <div class="option">
+        <label><input type="checkbox" id="preload"> 预热素材</label>
+      </div>
+      <p class="muted">预热素材会在作品开始运行前先把造型与声音解码进内存，代价是打开时要多等一小会儿。</p>
+      <div class="option">
+        <label for="mode">素材容器</label>
+        <select id="mode">
+          <option value="fast">BLPK 容器（默认）</option>
+          <option value="tw">TurboWarp 原始策略</option>
+        </select>
+      </div>
+      <p class="muted">BLPK 是本打包器自己的容器：条目会按测量结果选择性压缩，装入时直接交出素材视图、不再走一遍解压。
+        <code>tw</code> 保留上游策略，用来做 A/B 对照。</p>
+    </section>
+
+    <section class="card">
+      <h2>播放器选项</h2>
+      <div class="option">
+        <label for="title">页面标题</label>
+        <input type="text" id="title" spellcheck="false" placeholder="留空则用文件名">
+      </div>
+      <div class="option">
+        <label><input type="checkbox" id="autoplay"> 载入后自动运行</label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>高级选项</h2>
+      <div class="option">
+        <label><input type="checkbox" id="optimizePng" checked> PNG 无损重压</label>
+      </div>
+      <p class="muted">像素完全不变，只把 PNG 的行滤波与 deflate 流重新编码一遍。Scratch 造型是画布
+        <code>toDataURL()</code> 的产物，这一步通常能省下两位数百分比的体积。</p>
+      <div class="option">
+        <label><input type="checkbox" id="noDeflate"> 不压缩容器条目</label>
+      </div>
+      <p class="muted">只在测量到的收益不足 5% 时才逐个压缩；勾上这一项就一律原样存放。</p>
+    </section>
+
+    <section class="card">
+      <h2>环境</h2>
+      <p>选择要把作品打包成什么。</p>
+      <div class="option">
+        <label><input type="radio" name="target" value="html" checked> 单文件 HTML</label>
+      </div>
+      <div class="option">
+        <label><input type="radio" name="target" value="exe"> Windows 应用程序（EXE）</label>
+      </div>
+      <p class="muted" id="targetNote"></p>
+    </section>
+
+    <section class="card hidden" id="appSettings">
+      <h2>应用设置</h2>
+      <div class="group">
+        <h3>窗口</h3>
+        <div class="option">
+          <label for="width">窗口宽</label>
+          <input type="number" class="wider" id="width" value="640" min="160" max="8192">
+        </div>
+        <div class="option">
+          <label for="height">窗口高</label>
+          <input type="number" class="wider" id="height" value="480" min="160" max="8192">
+        </div>
+      </div>
+      <div class="group">
+        <h3>宿主</h3>
+        <div class="option">
+          <label><input type="checkbox" id="devtools" checked> 允许 F12 开发者工具</label>
+        </div>
+        <div class="option">
+          <label><input type="checkbox" id="build"> 顺带编译 exe</label>
+        </div>
+        <p class="muted" id="msvcNote"></p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="buttons">
+        <button class="button" id="exportBtn"><div class="dimmer"></div><div class="text">导出</div></button>
+        <button class="button" id="importBtn"><div class="dimmer"></div><div class="text">导入</div></button>
+        <input type="file" id="importInput" accept=".json,application/json" class="hidden">
+        <div class="side-buttons">
+          <button class="button dangerous" id="resetBtn"><div class="dimmer"></div><div class="text">重置全部</div></button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="buttons">
+        <button class="button" id="packBtn"><div class="dimmer"></div><div class="text">打包</div></button>
+        <button class="button secondary" id="previewBtn"><div class="dimmer"></div><div class="text">预览</div></button>
+      </div>
+    </section>
+
+  </div>
+
+  <section class="card hidden" id="statusCard">
+    <p id="status"></p>
+  </section>
+
+  <section class="card caption" id="downloadsHint">
+    <p>下载将显示在此处。</p>
+  </section>
+
+  <section class="card hidden" id="resultCard">
+    <h2>打包结果</h2>
+    <p class="headline" id="kpi"></p>
+    <p class="downloads" id="resultActions"></p>
+    <dl class="stats" id="stats"></dl>
+    <div class="hidden" id="logWrap" style="margin-top:12px">
+      <details><summary>编译输出</summary><pre class="log" id="log"></pre></details>
+    </div>
+  </section>
+
+  <footer>
+    <div>
+      <a href="https://github.com/DLGrass/BL-Packager">源码</a>
+      <span> - </span>
+      <a href="https://github.com/DLGrass/BL-Packager#readme">文档</a>
+      <span> - </span>
+      <a href="https://packager.turbowarp.org/">上游 TurboWarp 打包器</a>
+    </div>
+    <div>
+      <select id="theme">
+        <option value="system">主题：跟随系统</option>
+        <option value="light">主题：浅色</option>
+        <option value="dark">主题：深色</option>
+      </select>
+    </div>
+  </footer>
+
+</main>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------------------
+// The page is a thin front end: the packing itself happens in ui/server.js,
+// which is the same pipeline the two CLIs use. Everything here is option
+// plumbing, one fetch per action, and rendering the report that comes back.
+// ---------------------------------------------------------------------------
+
+const $ = (id) => document.getElementById(id);
+
+const DEFAULTS = {
+  target: 'html',
+  mode: 'fast',
+  title: '',
+  turbo: false,
+  autoplay: false,
+  framerate: '30',
+  username: 'player####',
+  preload: false,
+  optimizePng: true,
+  noDeflate: false,
+  width: '640',
+  height: '480',
+  devtools: true,
+  build: false
+};
+
+const state = {file: null, analysis: null, blobUrl: null, busy: false, health: null};
+
+const bytes = (n) => {
+  if (n === null || n === undefined) return '—';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(2) + ' MB';
+};
+const pct = (part, whole) => (whole ? (part / whole * 100).toFixed(1) + '%' : '—');
+const elapsed = (ms) => (ms / 1000).toFixed(2) + ' s';
+const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+
+// --- theme -----------------------------------------------------------------
+
+const themeQuery = window.matchMedia('(prefers-color-scheme: dark)');
+const resolveTheme = (value) => (value === 'system' ? (themeQuery.matches ? 'dark' : 'light') : value);
+const applyTheme = (value) => document.documentElement.setAttribute('theme', resolveTheme(value));
+
+let themeChoice = 'system';
+try { themeChoice = localStorage.getItem('BLPackager.theme') || 'system'; } catch { /* private mode */ }
+$('theme').value = themeChoice;
+applyTheme(themeChoice);
+
+$('theme').addEventListener('change', () => {
+  themeChoice = $('theme').value;
+  applyTheme(themeChoice);
+  try { localStorage.setItem('BLPackager.theme', themeChoice); } catch { /* private mode */ }
+});
+themeQuery.addEventListener('change', () => { if (themeChoice === 'system') applyTheme('system'); });
+
+// --- options ---------------------------------------------------------------
+// The DOM is the single source of truth for the options: readOptions() is what
+// goes over the wire, writeOptions() is what 导入/重置 write back. Keeping one
+// direction of truth is why the exported file and the API cannot disagree.
+
+const readOptions = () => ({
+  target: document.querySelector('input[name="target"]:checked').value,
+  mode: $('mode').value,
+  title: $('title').value.trim(),
+  turbo: $('turbo').checked,
+  autoplay: $('autoplay').checked,
+  framerate: $('framerate').value,
+  username: $('username').value.trim(),
+  preload: $('preload').checked,
+  optimizePng: $('optimizePng').checked,
+  noDeflate: $('noDeflate').checked,
+  width: $('width').value,
+  height: $('height').value,
+  devtools: $('devtools').checked,
+  build: $('build').checked
+});
+
+const writeOptions = (incoming) => {
+  const o = Object.assign({}, DEFAULTS, incoming || {});
+  const target = o.target === 'exe' ? 'exe' : 'html';
+  document.querySelector(`input[name="target"][value="${target}"]`).checked = true;
+  $('mode').value = o.mode === 'tw' ? 'tw' : 'fast';
+  $('title').value = o.title || '';
+  $('turbo').checked = !!o.turbo;
+  $('autoplay').checked = !!o.autoplay;
+  $('framerate').value = String(o.framerate);
+  $('username').value = String(o.username);
+  $('preload').checked = !!o.preload;
+  $('optimizePng').checked = o.optimizePng !== false;
+  $('noDeflate').checked = !!o.noDeflate;
+  $('width').value = String(o.width);
+  $('height').value = String(o.height);
+  $('devtools').checked = o.devtools !== false;
+  $('build').checked = !!o.build;
+  syncTarget();
+};
+
+const toQuery = () => {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(readOptions())) {
+    params.set(key, value === true ? '1' : value === false ? '0' : String(value));
+  }
+  if (state.file) params.set('filename', state.file.name);
+  return params;
+};
+
+const syncTarget = () => {
+  const isExe = readOptions().target === 'exe';
+  $('appSettings').classList.toggle('hidden', !isExe);
+  $('previewBtn').classList.toggle('hidden', isExe);
+  $('targetNote').textContent = isExe
+    ? '宿主是 WebView2（Windows 10/11 自带），页面部分与 HTML 目标走同一条管线，产物实测比原始 sb3 还小。'
+    : '产物是单个 .html 文件，双击即可在浏览器里运行，也可以直接挂到网站上。';
+};
+
+document.addEventListener('change', (event) => {
+  if (event.target && event.target.name === 'target') syncTarget();
+});
+
+// --- status ----------------------------------------------------------------
+
+const say = (text, kind = '') => {
+  $('statusCard').classList.remove('hidden');
+  $('statusCard').classList.toggle('error', kind === 'error');
+  $('status').textContent = text;
+  $('status').className = kind;
+};
+
+const clearStatus = () => {
+  $('statusCard').classList.add('hidden');
+  $('status').textContent = '';
+};
+
+const errorFrom = async (res) => {
+  const text = await res.text();
+  try { return JSON.parse(text).error || text; } catch { return text || ('HTTP ' + res.status); }
+};
+
+// --- health ----------------------------------------------------------------
+
+fetch('/api/health').then((r) => r.json()).then((health) => {
+  state.health = health;
+  $('versionLine').textContent = `本地打包器 · Node ${health.node} · 零运行时依赖`;
+
+  const problems = [];
+  if (!health.scaffolding.min) {
+    problems.push('<p class="warning">缺少 <code>vendor/scaffolding-min.js</code>，无法打包。' +
+      '请从 <a href="https://packager.turbowarp.org/scaffolding/scaffolding-min.js">packager.turbowarp.org</a> ' +
+      '下载后放进 <code>vendor/</code>。</p>');
+  }
+  $('msvcNote').innerHTML = health.msvc
+    ? '编译器已就位，勾选后会在本页直接编译出 exe（约几十秒）。'
+    : '没有找到 MSVC，只能生成资源、无法在这里编译。资源会写进 <code>exe/build/</code>，' +
+      '之后可以在仓库根目录手动运行 <code>exe\\build.cmd</code>。';
+
+  if (problems.length) {
+    $('healthBody').innerHTML = problems.join('');
+    $('healthCard').classList.remove('hidden');
+    $('loadBtn').disabled = true;
+  }
+}).catch(() => { /* the page still works; only the hints are lost */ });
+
+// --- project selection -----------------------------------------------------
+
+const acceptFile = (file) => {
+  if (!file) return;
+  if (!/\.sb[23]?$/i.test(file.name)) {
+    return say(`只接受 .sb / .sb2 / .sb3 文件，收到的是 ${file.name}`, 'error');
+  }
+  state.file = file;
+  state.analysis = null;
+  $('dropTitle').textContent = `已选择 ${file.name}（${bytes(file.size)}）`;
+  $('loadBtn').disabled = false;
+  $('packBtn').disabled = true;
+  $('optionsRoot').classList.add('hidden');
+  $('projectCard').classList.add('hidden');
+  $('loadHint').classList.remove('hidden');
+  clearResult();
+  clearStatus();
+};
+
+$('fileInput').addEventListener('change', () => acceptFile($('fileInput').files[0]));
+
+const selectCard = $('selectCard');
+for (const type of ['dragenter', 'dragover']) {
+  selectCard.addEventListener(type, (e) => {
+    e.preventDefault();
+    selectCard.style.outline = '2px dashed var(--blue)';
+  });
+}
+for (const type of ['dragleave', 'drop']) {
+  selectCard.addEventListener(type, () => { selectCard.style.outline = ''; });
+}
+selectCard.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const dropped = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (!dropped) return;
+  const transfer = new DataTransfer();
+  transfer.items.add(dropped);
+  $('fileInput').files = transfer.files;
+  acceptFile(dropped);
+});
+// A file dropped anywhere else would otherwise navigate away from the page.
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => e.preventDefault());
+
+const addStat = (label, value) => {
+  $('stats').insertAdjacentHTML('beforeend', `<dt>${escapeHtml(label)}</dt><dd>${value}</dd>`);
+};
+
+$('loadBtn').addEventListener('click', async () => {
+  if (!state.file || state.busy) return;
+  state.busy = true;
+  $('loadBtn').disabled = true;
+  say('正在解析作品…', 'busy');
+  try {
+    const res = await fetch('/api/inspect?filename=' + encodeURIComponent(state.file.name), {
+      method: 'POST',
+      body: state.file
+    });
+    if (!res.ok) throw new Error(await errorFrom(res));
+
+    const data = await res.json();
+    state.analysis = data.analysis;
+
+    const a = data.analysis;
+    const pngCount = data.byExtension.png || 0;
+    $('projectStats').innerHTML = '';
+    addProject('规模', `${a.targetCount} 个角色 · ${a.assetCount} 个素材（${bytes(a.assetBytes)}）`);
+    addProject('原始文件', `${bytes(a.originalBytes)}，其中 project.json ${bytes(a.projectJSONBytes)}`);
+    addProject('运行时', `${data.scaffolding}${a.usesMusic ? '（作品用到 music 扩展，必须是 full 版）' : ''}`);
+    addProject('素材构成', Object.entries(data.byExtension)
+      .sort((x, y) => y[1] - x[1])
+      .map(([ext, n]) => `${ext} ×${n}`).join(' · ') || '—');
+    addProject('可用优化', pngCount
+      ? `${pngCount} 张 PNG 素材 —— 打包时会逐张尝试无损重压，能不能省下取决于素材本身的编码`
+      : '没有 PNG 素材，重压那一步会是个空操作');
+    if (a.extensions && a.extensions.length) addProject('扩展', a.extensions.join(' · '));
+
+    $('projectCard').classList.remove('hidden');
+    $('loadHint').classList.add('hidden');
+    $('optionsRoot').classList.remove('hidden');
+    $('packBtn').disabled = false;
+    if (!$('title').value) $('title').value = state.file.name.replace(/\.[^.]+$/, '');
+    say(data.warning ? `已载入作品。${data.warning}` : `已载入作品，用时 ${elapsed(data.ms)}`, data.warning ? 'error' : '');
+  } catch (error) {
+    say(String(error && error.message ? error.message : error), 'error');
+  } finally {
+    state.busy = false;
+    $('loadBtn').disabled = false;
+  }
+});
+
+function addProject(label, value) {
+  $('projectStats').insertAdjacentHTML('beforeend',
+    `<dt>${escapeHtml(label)}</dt><dd>${value}</dd>`);
+}
+
+// --- packing ---------------------------------------------------------------
+
+const clearResult = () => {
+  $('resultCard').classList.add('hidden');
+  $('downloadsHint').classList.remove('hidden');
+  $('kpi').innerHTML = '';
+  $('resultActions').innerHTML = '';
+  $('stats').innerHTML = '';
+  $('logWrap').classList.add('hidden');
+  $('log').textContent = '';
+  if (state.blobUrl) {
+    URL.revokeObjectURL(state.blobUrl);
+    state.blobUrl = null;
+  }
+};
+
+const runWithStatus = async (label, work) => {
+  if (!state.file || state.busy) return null;
+  state.busy = true;
+  $('packBtn').disabled = true;
+  $('previewBtn').disabled = true;
+  $('loadBtn').disabled = true;
+  const started = performance.now();
+  const tick = setInterval(() => say(`${label} ${elapsed(performance.now() - started)}`, 'busy'), 100);
+  say(label, 'busy');
+  try {
+    const result = await work();
+    // Deliberately no clearStatus() here: `work` has already written its own
+    // 完成/失败 message, and wiping it would leave the user staring at an empty
+    // card wondering whether anything happened.
+    return result;
+  } catch (error) {
+    say(String(error && error.message ? error.message : error), 'error');
+    return null;
+  } finally {
+    clearInterval(tick);
+    state.busy = false;
+    $('packBtn').disabled = false;
+    $('previewBtn').disabled = false;
+    $('loadBtn').disabled = false;
+  }
+};
+
+/** Returns the blob URL, or null when the request failed (status already shown). */
+const packHtml = () => runWithStatus('打包中…', async () => {
+  clearResult();
+  const res = await fetch('/api/pack?' + toQuery().toString(), {method: 'POST', body: state.file});
+  if (!res.ok) throw new Error(await errorFrom(res));
+
+  const report = JSON.parse(decodeURIComponent(res.headers.get('x-pack-stats') || '%7B%7D'));
+  const name = decodeURIComponent(res.headers.get('x-pack-filename') || 'project.html');
+  const blob = await res.blob();
+  if (state.blobUrl) URL.revokeObjectURL(state.blobUrl);
+  state.blobUrl = URL.createObjectURL(blob);
+
+  const a = report.project || {};
+  $('kpi').innerHTML = `<b>${bytes(report.htmlBytes)}</b> 产物 · 原始 sb3 ${bytes(a.originalBytes)} · ` +
+    `占 ${pct(report.htmlBytes, a.originalBytes)} · ${elapsed(report.ms)}`;
+  $('resultActions').innerHTML =
+    `<a href="${state.blobUrl}" download="${escapeHtml(name)}">下载 ${escapeHtml(name)}（${bytes(report.htmlBytes)}）</a>` +
+    ` · <a href="${state.blobUrl}" target="_blank" rel="noopener">在新标签页运行</a>`;
+  $('downloadsHint').classList.add('hidden');
+  $('resultCard').classList.remove('hidden');
+
+  addStat('作品', `${a.targetCount} 个角色 · ${a.assetCount} 个素材（${bytes(a.assetBytes)}）`);
+  addStat('运行时', escapeHtml(report.scaffolding) + (a.usesMusic ? '（含 music 扩展）' : ''));
+  addStat('PNG 重压', a.png && a.png.optimized
+    ? `${a.png.optimized} 张无损重编码，${bytes(a.png.before)} → ${bytes(a.png.after)}` +
+      `（<span class="ok">省 ${bytes(a.png.before - a.png.after)}</span>）`
+    : '<span class="muted">没有可省的</span>');
+  if (report.container) {
+    addStat('容器', `载荷 ${bytes(report.container.payloadBytes)}` +
+      `（${report.container.assetsDeflated} 压缩 / ${report.container.assetsRaw} 原样，省 ${bytes(report.container.deflatedBytesSaved)}）`);
+  }
+  addStat('数据块', `${report.chunks} 块`);
+
+  say(`完成，用时 ${elapsed(report.ms)}`);
+  return state.blobUrl;
+});
+
+const packExe = () => runWithStatus('生成 exe 资源中…', async () => {
+  clearResult();
+  const res = await fetch('/api/pack-exe?' + toQuery().toString(), {method: 'POST', body: state.file});
+  if (!res.ok) throw new Error(await errorFrom(res));
+  const data = await res.json();
+  const r = data.report;
+
+  $('kpi').innerHTML = `<b>${bytes(r.exeBytes || r.resourceBytes)}</b> ` +
+    `${r.exeBytes ? 'EXE' : (r.resourceGzip ? 'HTML 资源（gzip）' : 'HTML 资源')} · ` +
+    `未压缩 HTML ${bytes(r.htmlBytes)} · 占 sb3 ${pct(r.exeBytes || r.resourceBytes, r.project.originalBytes)} · ` +
+    `${elapsed(data.ms)}`;
+
+  const links = data.artifacts.map((artifact) => {
+    const primary = artifact.name.endsWith('.exe') ? ' style="font-weight:bold"' : '';
+    return `<a${primary} href="/api/artifact?name=${encodeURIComponent(artifact.name)}" ` +
+      `download="${escapeHtml(artifact.name)}">${escapeHtml(artifact.name)}（${bytes(artifact.bytes)}）</a>`;
+  });
+  $('resultActions').innerHTML = links.length ? links.join(' · ') : '<span class="muted">没有产物</span>';
+  $('downloadsHint').classList.add('hidden');
+  $('resultCard').classList.remove('hidden');
+
+  addStat('作品', `${r.project.targetCount} 个角色 · ${r.project.assetCount} 个素材`);
+  addStat('运行时', escapeHtml(r.scaffolding));
+  if (r.project.png && r.project.png.optimized) {
+    addStat('PNG 重压', `${r.project.png.optimized} 张，省 ${bytes(r.project.png.before - r.project.png.after)}`);
+  }
+  addStat('HTML 资源', `${bytes(r.resourceBytes)}${r.resourceGzip ? '（gzip -9）' : '（未压缩）'}`);
+  if (r.hostBytes !== null && r.hostBytes !== undefined) {
+    addStat('宿主代码', `${bytes(r.hostBytes)}<span class="muted">（exe 里不属于作品素材的部分）</span>`);
+  }
+
+  const log = [];
+  if (data.build.attempted) {
+    log.push(data.build.ok
+      ? '编译成功'
+      : `编译失败：${data.build.reason || ('exit ' + data.build.status)}`);
+    log.push('');
+    log.push((data.build.stdout || '') + (data.build.stderr || ''));
+  } else {
+    log.push('未编译（没有勾选「顺带编译 exe」）。资源已经写进 exe/build/，');
+    log.push('随时可以在仓库根目录运行：  exe\\build.cmd');
+  }
+  $('log').textContent = log.join('\n');
+  $('logWrap').classList.remove('hidden');
+
+  say(`完成${r.exeBytes ? `，EXE ${bytes(r.exeBytes)}` : '（只生成了资源）'}，用时 ${elapsed(data.ms)}`);
+  return true;
+});
+
+$('packBtn').addEventListener('click', () => {
+  if (readOptions().target === 'exe') packExe();
+  else packHtml();
+});
+
+// 预览 needs a window opened synchronously in the click handler — after the
+// await the popup blocker would stop it. Open it first, point it at the blob
+// once the packing finishes, and fall back to the link if it was blocked.
+$('previewBtn').addEventListener('click', async () => {
+  if (!state.file || state.busy) return;
+  const tab = window.open('', '_blank');
+  if (tab) tab.document.write('<p style="font-family:sans-serif">正在打包，完成后会自动跳转…</p>');
+  const url = await packHtml();
+  if (!url) { if (tab) tab.close(); return; }
+  if (tab) tab.location.href = url;
+  else say('预览被浏览器拦截了，请用下方的「在新标签页运行」', 'error');
+});
+
+// --- export / import / reset ----------------------------------------------
+
+$('exportBtn').addEventListener('click', () => {
+  const payload = JSON.stringify({app: 'bl-packager', version: 1, options: readOptions()}, null, 2);
+  const url = URL.createObjectURL(new Blob([payload], {type: 'application/json'}));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = 'bl-packager-options.json';
+  anchor.click();
+  URL.revokeObjectURL(url);
+});
+
+$('importBtn').addEventListener('click', () => $('importInput').click());
+$('importInput').addEventListener('change', async () => {
+  const file = $('importInput').files[0];
+  if (!file) return;
+  try {
+    const parsed = JSON.parse(await file.text());
+    writeOptions(parsed && parsed.options ? parsed.options : parsed);
+    say('已导入选项');
+  } catch (error) {
+    say(`导入失败：${error.message}`, 'error');
+  }
+  $('importInput').value = '';
+});
+
+$('resetBtn').addEventListener('click', () => {
+  writeOptions(DEFAULTS);
+  say('已重置为默认选项');
+});
+
+// --- initial state ---------------------------------------------------------
+
+writeOptions(DEFAULTS);
+</script>
+</body>
+</html>

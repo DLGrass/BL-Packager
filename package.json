@@ -1,0 +1,22 @@
+{
+  "name": "bl-packager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zero-dependency sb3 -> single-file HTML packager, modeled on TurboWarp/packager, with a faster asset-loading path.",
+  "type": "commonjs",
+  "main": "src/lib/index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "pack": "node src/pack.js",
+    "pack-exe": "node src/pack-exe.js",
+    "ui": "node ui/server.js",
+    "make-project": "node bench/make-project.js",
+    "bench": "node bench/run.js",
+    "ui-check": "node bench/ui-check.js",
+    "test": "node test/run.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

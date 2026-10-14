@@ -1,0 +1,15 @@
+node_modules/
+out/
+vendor/*.js
+!vendor/.gitkeep
+*.log
+
+# exe build output: the payload resources, the compiled binaries, and the
+# downloaded WebView2 SDK. All of it regenerates from src/pack-exe.js + build.cmd.
+exe/build/
+exe/sdk/
+
+# Editor / assistant scratch: local working notes, which mention machine-specific
+# paths and are not part of the packager.
+.workbuddy/
+.wb-*

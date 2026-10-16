@@ -9,7 +9,10 @@
 <style>
   /* Geometry follows TurboWarp/packager's src/p4 UI: a centred column of 625px
      cards, a 6px accent bar on top of the noteworthy ones, and flat
-     Material-ish buttons. The palette is Bilup's, not TurboWarp's. */
+     Material-ish buttons. The palette is Bilup's, not TurboWarp's — upstream
+     gives every section its own accent, which would undo the brand colour, so
+     all bars here take --accent and the sections are told apart by their
+     headings instead. */
   :root {
     /* Bilup brand teal. It is a light hue, so anything that sits ON it
        (button labels) uses --accent-ink rather than white: white on #75c1c4 is
@@ -86,14 +89,8 @@
     padding: 1em;
     box-shadow: var(--shadow);
   }
+  .card.accent { border-top: 6px solid var(--accent); }
   .card.caption { font-style: italic; color: var(--fg); }
-  .card.center {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 40px;
-    text-align: center;
-  }
 
   /* controls ------------------------------------------------------------- */
   input[type="text"], input[type="number"], textarea { padding: 2px; }
@@ -112,6 +109,22 @@
   input[type="file"] { color: inherit; font-family: inherit; }
   input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   input:invalid { outline: 2px solid red; }
+  /* Swatches need an explicit box: without one Chromium renders them at the
+     platform default size, which is noticeably taller than the row. */
+  input[type="color"] {
+    width: 40px; height: 22px; padding: 0;
+    background-color: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 2px;
+    cursor: pointer;
+  }
+  textarea {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 64px;
+    font: 12px/1.5 ui-monospace, Consolas, monospace;
+    resize: vertical;
+  }
   summary { cursor: pointer; }
 
   .options { margin: 12px 0; }
@@ -124,6 +137,10 @@
     min-height: 25px;
   }
   .option > label { margin-right: 2px; }
+  /* A label wrapping a textarea has to leave the flex row, or the textarea is
+     squeezed to whatever is left on the line. */
+  .option.stacked { display: block; }
+  .option.stacked > span { display: block; margin-bottom: 4px; }
   .group { margin: 14px 0; }
 
   /* buttons: primary / secondary / dangerous, as in the upstream Button */
@@ -176,8 +193,6 @@
   .card.error { border: 2px solid #ff4c4c; }
 
   /* results -------------------------------------------------------------- */
-  .headline { font-size: 1.05em; margin: 8px 0; }
-  .headline b { font-size: 1.25em; }
   dl.stats {
     display: grid;
     grid-template-columns: max-content minmax(0, 1fr);
@@ -195,7 +210,10 @@
     font: 12px/1.5 ui-monospace, Consolas, monospace;
     white-space: pre-wrap;
   }
-  .downloads p { margin: 6px 0; }
+  /* The download links live on the status line, so they must not add a gap
+     when there is nothing to download. */
+  #downloads { margin: 8px 0 0; }
+  #downloads a { font-weight: bold; }
 
   footer { text-align: center; padding-bottom: 24px; }
   footer > div { margin-top: 12px; }
@@ -219,7 +237,7 @@
 <body>
 <main id="main">
 
-  <section class="card" style="border-top:6px solid var(--accent)">
+  <section class="card accent">
     <h1>BL Packager</h1>
     <p class="version" id="versionLine">本地打包器</p>
     <p>把 Scratch 3 作品打包成<strong>单文件 HTML</strong>，或带 WebView2 宿主的 <strong>Windows 可执行文件</strong>。</p>
@@ -231,7 +249,7 @@
     <div id="healthBody"></div>
   </section>
 
-  <section class="card" id="selectCard" style="border-top:6px solid var(--accent)">
+  <section class="card accent" id="selectCard">
     <h2>选择作品</h2>
     <p>选择一个 <code>.sb3</code> 作品文件，也可以直接把它拖到这张卡片上。</p>
 
@@ -255,32 +273,193 @@
     <p>载入作品之后才能配置打包选项。</p>
   </section>
 
-  <section class="card hidden" id="projectCard">
-    <h2>作品</h2>
-    <dl class="stats" id="projectStats"></dl>
-  </section>
-
   <div id="optionsRoot" class="hidden">
 
     <section class="card">
-      <h2>运行时选项</h2>
-      <div class="option">
-        <label><input type="checkbox" id="turbo"> Turbo 模式</label>
-      </div>
+      <h2>运行选项</h2>
+      <label class="option">
+        <input type="checkbox" id="turbo"> 加速模式
+      </label>
       <div class="option">
         <label for="framerate">帧率</label>
         <input type="number" id="framerate" value="30" min="0" max="240">
         <span class="muted">0 = 不限制</span>
       </div>
+      <label class="option">
+        <input type="checkbox" id="interpolation"> 补帧
+      </label>
+      <label class="option">
+        <input type="checkbox" id="highQualityPen"> 高清画笔
+      </label>
+      <label class="option">
+        <input type="checkbox" id="infiniteClones"> 无限克隆
+      </label>
+      <label class="option">
+        <input type="checkbox" id="removeFencing"> 角色可穿过边缘
+      </label>
+      <label class="option">
+        <input type="checkbox" id="removeMiscLimits"> 移除其他限制
+      </label>
       <div class="option">
         <label for="username">用户名</label>
         <input type="text" class="shorter" id="username" value="player####">
-        <span class="muted">给「用户名」积木使用，<code>#</code> 会替换成随机数字</span>
+        <span class="muted">给「用户名」积木使用，每个 <code>#</code> 代表一位随机数字</span>
+      </div>
+      <label class="option">
+        <input type="checkbox" id="closeWhenStopped"> 当作品停止时关闭窗口
+      </label>
+
+      <h3>舞台</h3>
+      <div class="option">
+        <label for="stageWidth">自定义舞台大小</label>
+        <input type="number" class="wider" id="stageWidth" value="480" min="1" max="4096">
+        <span>×</span>
+        <input type="number" class="wider" id="stageHeight" value="360" min="1" max="4096">
+      </div>
+      <div class="group">
+        <label class="option">
+          <input type="radio" name="resizeMode" value="preserve-ratio" checked> 调整大小时保留纵横比（推荐）
+        </label>
+        <label class="option">
+          <input type="radio" name="resizeMode" value="stretch"> 拉伸舞台以填充屏幕而不改变实际大小
+        </label>
+        <label class="option">
+          <input type="radio" name="resizeMode" value="dynamic-resize"> 动态匹配窗口大小（实验性）
+        </label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>展示选项</h2>
+      <div class="option">
+        <label for="title">页面标题</label>
+        <input type="text" id="title" spellcheck="false" placeholder="留空则用文件名">
+      </div>
+
+      <h3>加载页</h3>
+      <label class="option">
+        <input type="checkbox" id="progressBar" checked> 显示进度条
+      </label>
+      <div class="option">
+        <label for="loadingText">加载提示文本</label>
+        <input type="text" id="loadingText" placeholder="（无）">
+      </div>
+
+      <h3>控制栏</h3>
+      <div class="group">
+        <label class="option">
+          <input type="checkbox" id="autoplay"> 加载完成时自动开始运行而不是显示一个大绿旗
+        </label>
+        <p class="muted">很多浏览器不允许网站自动播放声音，因此在用户与作品交互前，声音可能不会播放。</p>
+      </div>
+      <label class="option">
+        <input type="checkbox" id="controlGreenFlag"> 在控制栏显示绿旗按钮
+      </label>
+      <label class="option">
+        <input type="checkbox" id="controlStopAll"> 在控制栏显示停止按钮
+      </label>
+      <label class="option">
+        <input type="checkbox" id="controlPause"> 在控制栏显示暂停按钮
+      </label>
+      <label class="option">
+        <input type="checkbox" id="controlFullscreen"> 在控制栏显示全屏按钮
+      </label>
+
+      <h3>颜色</h3>
+      <div class="option">
+        <label for="background">背景色</label>
+        <input type="color" id="background" value="#000000">
       </div>
       <div class="option">
-        <label><input type="checkbox" id="preload"> 预热素材</label>
+        <label for="foreground">前景色</label>
+        <input type="color" id="foreground" value="#ffffff">
+        <span class="muted">进度条、部分图标与文本</span>
       </div>
-      <p class="muted">预热素材会在作品开始运行前先把造型与声音解码进内存，代价是打开时要多等一小会儿。</p>
+      <div class="option">
+        <label for="accent">主题色</label>
+        <input type="color" id="accent" value="#4d97ff">
+        <span class="muted">激活/悬停的控件、询问窗口、上下文菜单</span>
+      </div>
+
+      <h3>监视器</h3>
+      <label class="option">
+        <input type="checkbox" id="editableLists"> 允许编辑列表
+      </label>
+      <div class="option">
+        <label for="variableColor">变量颜色</label>
+        <input type="color" id="variableColor" value="#ff8c1a">
+      </div>
+      <div class="option">
+        <label for="listColor">列表颜色</label>
+        <input type="color" id="listColor" value="#fc662c">
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>输入</h2>
+      <div class="group">
+        <label class="option">
+          <input type="radio" name="cursor" value="auto" checked> 正常指针
+        </label>
+        <label class="option">
+          <input type="radio" name="cursor" value="none"> 无指针
+        </label>
+      </div>
+      <p class="muted">上游还有「自定义指针图案」和「指针锁定 / 手柄」两组选项。前者要上传图片，
+        后者要靠 addons 里的额外区块，本机版都不具备，所以没有放上来。</p>
+    </section>
+
+    <section class="card">
+      <h2>云变量</h2>
+      <div class="group">
+        <label class="option">
+          <input type="radio" name="cloudMode" value="off" checked> 忽略（当作普通变量处理）
+        </label>
+        <label class="option">
+          <input type="radio" name="cloudMode" value="local"> 存储在本地浏览器
+        </label>
+      </div>
+      <p class="muted">「存储在本地」会把 <code>☁</code> 变量的值写进浏览器的 localStorage，并在作品打开时恢复；
+        同一个浏览器里打开多个窗口，改动会在窗口之间同步。存储键以「作品 ID」区分，所以下面这一项要填得具体一些。</p>
+      <div class="option">
+        <label for="projectId">作品 ID</label>
+        <input type="text" id="projectId" spellcheck="false" placeholder="例如 my-game-2026">
+      </div>
+      <p class="muted">上游的默认做法是连到 <code>clouddata.turbowarp.org</code> 与其他玩家实时同步，
+        那需要联网，因此本机版只提供本地存储这一种模式。</p>
+    </section>
+
+    <section class="card">
+      <h2>高级选项</h2>
+      <div class="option">
+        <label><input type="checkbox" id="compilerEnabled" checked> 使用编译</label>
+        <span class="muted">关掉后回到解释执行，用来对照编译带来的差异</span>
+      </div>
+      <div class="option">
+        <label><input type="checkbox" id="warpTimer"> 循环计时器</label>
+        <span class="muted">给「运行时不刷新屏幕」的循环加计时，方便定位卡顿</span>
+      </div>
+      <div class="option stacked">
+        <span>自定义 CSS（如果你不确定你在做什么，别动它）</span>
+        <textarea id="customCSS" spellcheck="false"></textarea>
+      </div>
+      <div class="option stacked">
+        <span>自定义 JS（如果你不确定你在做什么，别动它）</span>
+        <textarea id="customJS" spellcheck="false"></textarea>
+      </div>
+      <div class="option">
+        <label><input type="checkbox" id="packagedRuntime" checked> 加载后移除原始素材数据以节约内存</label>
+      </div>
+      <div class="option">
+        <label><input type="checkbox" id="bigTexture"> 增大最大矢量图像分辨率</label>
+        <span class="muted">2048 → 4096，大矢量图看起来更好，但更吃内存，也可能崩</span>
+      </div>
+      <p class="muted">上游还可以挂「自定义扩展」并在打包时烘焙进去。那一步要么联网下载，要么把扩展源码整段塞进产物，
+        和本机版「不联网」的前提冲突，因此没有放上来。</p>
+    </section>
+
+    <section class="card">
+      <h2>本打包器专用</h2>
       <div class="option">
         <label for="mode">素材容器</label>
         <select id="mode">
@@ -290,21 +469,6 @@
       </div>
       <p class="muted">BLPK 是本打包器自己的容器：条目会按测量结果选择性压缩，装入时直接交出素材视图、不再走一遍解压。
         <code>tw</code> 保留上游策略，用来做 A/B 对照。</p>
-    </section>
-
-    <section class="card">
-      <h2>播放器选项</h2>
-      <div class="option">
-        <label for="title">页面标题</label>
-        <input type="text" id="title" spellcheck="false" placeholder="留空则用文件名">
-      </div>
-      <div class="option">
-        <label><input type="checkbox" id="autoplay"> 载入后自动运行</label>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>高级选项</h2>
       <div class="option">
         <label><input type="checkbox" id="optimizePng" checked> PNG 无损重压</label>
       </div>
@@ -314,23 +478,25 @@
         <label><input type="checkbox" id="noDeflate"> 不压缩容器条目</label>
       </div>
       <p class="muted">只在测量到的收益不足 5% 时才逐个压缩；勾上这一项就一律原样存放。</p>
+      <div class="option">
+        <label><input type="checkbox" id="preload"> 预热素材</label>
+      </div>
+      <p class="muted">预热素材会在作品开始运行前先把造型与声音解码进内存，代价是打开时要多等一小会儿。</p>
     </section>
 
     <section class="card">
-      <h2>环境</h2>
-      <p>选择要把作品打包成什么。</p>
-      <div class="option">
-        <label><input type="radio" name="target" value="html" checked> 单文件 HTML</label>
-      </div>
-      <div class="option">
-        <label><input type="radio" name="target" value="exe"> Windows 应用程序（EXE）</label>
+      <h2>运行环境</h2>
+      <div class="group">
+        <label class="option">
+          <input type="radio" name="target" value="html" checked> 单文件 HTML
+        </label>
+        <label class="option">
+          <input type="radio" name="target" value="exe"> Windows 应用程序（EXE）
+        </label>
       </div>
       <p class="muted" id="targetNote"></p>
-    </section>
 
-    <section class="card hidden" id="appSettings">
-      <h2>应用设置</h2>
-      <div class="group">
+      <div class="group hidden" id="appSettings">
         <h3>窗口</h3>
         <div class="option">
           <label for="width">窗口宽</label>
@@ -340,8 +506,6 @@
           <label for="height">窗口高</label>
           <input type="number" class="wider" id="height" value="480" min="160" max="8192">
         </div>
-      </div>
-      <div class="group">
         <h3>宿主</h3>
         <div class="option">
           <label><input type="checkbox" id="devtools" checked> 允许 F12 开发者工具</label>
@@ -375,18 +539,14 @@
 
   <section class="card hidden" id="statusCard">
     <p id="status"></p>
-  </section>
-
-  <section class="card caption" id="downloadsHint">
-    <p>下载将显示在此处。</p>
-  </section>
-
-  <section class="card hidden" id="resultCard">
-    <h2>打包结果</h2>
-    <p class="headline" id="kpi"></p>
-    <p class="downloads" id="resultActions"></p>
-    <dl class="stats" id="stats"></dl>
-    <div class="hidden" id="logWrap" style="margin-top:12px">
+    <p class="downloads hidden" id="downloads"></p>
+    <div class="hidden" id="projectWrap" style="margin-top:10px">
+      <details><summary>作品详情</summary><dl class="stats" id="projectStats"></dl></details>
+    </div>
+    <div class="hidden" id="statsWrap" style="margin-top:10px">
+      <details><summary>打包详情</summary><dl class="stats" id="stats"></dl></details>
+    </div>
+    <div class="hidden" id="logWrap" style="margin-top:10px">
       <details><summary>编译输出</summary><pre class="log" id="log"></pre></details>
     </div>
   </section>
@@ -417,28 +577,66 @@
 // The page is a thin front end: the packing itself happens in ui/server.js,
 // which is the same pipeline the two CLIs use. Everything here is option
 // plumbing, one fetch per action, and rendering the report that comes back.
+//
+// The option list and its wording follow TurboWarp's PackagerOptions.svelte, so
+// that a value read here means the same thing as it does upstream. Only the
+// options the inlined scaffolding actually honours are present — see html.js.
 // ---------------------------------------------------------------------------
 
 const $ = (id) => document.getElementById(id);
 
+// The wire format, not the DOM shape: 无限克隆 / 角色可穿过边缘 / 增大矢量图分辨率
+// are three checkboxes that map onto maxClones / fencing / maxTextureDimension.
+// Keeping readOptions() in the wire format means 导出 writes a file the CLIs
+// accept as-is, and 导入 only has to do the inverse conversion once.
 const DEFAULTS = {
   target: 'html',
   mode: 'fast',
   title: '',
   turbo: false,
-  autoplay: false,
-  framerate: '30',
+  framerate: 30,
+  interpolation: false,
+  highQualityPen: false,
+  maxClones: 300,
+  fencing: true,
+  miscLimits: true,
   username: 'player####',
+  closeWhenStopped: false,
+  stageWidth: 480,
+  stageHeight: 360,
+  resizeMode: 'preserve-ratio',
+  autoplay: false,
+  progressBar: true,
+  loadingText: '',
+  controlGreenFlag: false,
+  controlStopAll: false,
+  controlPause: false,
+  controlFullscreen: false,
+  accent: '#4d97ff',
+  background: '#000000',
+  foreground: '#ffffff',
+  editableLists: false,
+  variableColor: '#ff8c1a',
+  listColor: '#fc662c',
+  cursor: 'auto',
+  cloudMode: 'off',
+  projectId: '',
+  compilerEnabled: true,
+  warpTimer: false,
+  customCSS: '',
+  customJS: '',
+  packagedRuntime: true,
+  maxTextureDimension: 2048,
   preload: false,
   optimizePng: true,
   noDeflate: false,
-  width: '640',
-  height: '480',
+  width: 640,
+  height: 480,
   devtools: true,
   build: false
 };
 
-const state = {file: null, analysis: null, blobUrl: null, busy: false, health: null};
+const state = {file: null, blobUrl: null, busy: false};
 
 const bytes = (n) => {
   if (n === null || n === undefined) return '—';
@@ -469,44 +667,124 @@ $('theme').addEventListener('change', () => {
 themeQuery.addEventListener('change', () => { if (themeChoice === 'system') applyTheme('system'); });
 
 // --- options ---------------------------------------------------------------
-// The DOM is the single source of truth for the options: readOptions() is what
-// goes over the wire, writeOptions() is what 导入/重置 write back. Keeping one
-// direction of truth is why the exported file and the API cannot disagree.
+// The DOM is the single source of truth: readOptions() is what goes over the
+// wire, writeOptions() is what 导入/重置 write back. Keeping one direction of
+// truth is why the exported file and the API cannot disagree.
 
-const readOptions = () => ({
-  target: document.querySelector('input[name="target"]:checked').value,
-  mode: $('mode').value,
-  title: $('title').value.trim(),
-  turbo: $('turbo').checked,
-  autoplay: $('autoplay').checked,
-  framerate: $('framerate').value,
-  username: $('username').value.trim(),
-  preload: $('preload').checked,
-  optimizePng: $('optimizePng').checked,
-  noDeflate: $('noDeflate').checked,
-  width: $('width').value,
-  height: $('height').value,
-  devtools: $('devtools').checked,
-  build: $('build').checked
-});
+const HEX = /^#[0-9a-f]{6}$/i;
+const colorValue = (value, fallback) => (HEX.test(String(value == null ? '' : value)) ? String(value) : fallback);
+const radioValue = (name, fallback) => {
+  const checked = document.querySelector(`input[name="${name}"]:checked`);
+  return checked ? checked.value : fallback;
+};
+const pickRadio = (name, value, allowed, fallback) =>
+  document.querySelector(`input[name="${name}"][value="${allowed.includes(value) ? value : fallback}"]`).checked = true;
+
+const readOptions = () => {
+  const num = (id, fallback) => {
+    const parsed = Number($(id).value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+  return {
+    target: radioValue('target', 'html'),
+    mode: $('mode').value === 'tw' ? 'tw' : 'fast',
+    title: $('title').value.trim(),
+
+    turbo: $('turbo').checked,
+    framerate: num('framerate', 30),
+    interpolation: $('interpolation').checked,
+    highQualityPen: $('highQualityPen').checked,
+    // The checkbox is the whole of upstream's option; 300 is its "finite" value.
+    maxClones: $('infiniteClones').checked ? Infinity : 300,
+    fencing: !$('removeFencing').checked,
+    miscLimits: !$('removeMiscLimits').checked,
+    username: $('username').value.trim(),
+    closeWhenStopped: $('closeWhenStopped').checked,
+    stageWidth: num('stageWidth', 480),
+    stageHeight: num('stageHeight', 360),
+    resizeMode: radioValue('resizeMode', 'preserve-ratio'),
+
+    autoplay: $('autoplay').checked,
+    progressBar: $('progressBar').checked,
+    loadingText: $('loadingText').value,
+    controlGreenFlag: $('controlGreenFlag').checked,
+    controlStopAll: $('controlStopAll').checked,
+    controlPause: $('controlPause').checked,
+    controlFullscreen: $('controlFullscreen').checked,
+    accent: $('accent').value,
+    background: $('background').value,
+    foreground: $('foreground').value,
+    editableLists: $('editableLists').checked,
+    variableColor: $('variableColor').value,
+    listColor: $('listColor').value,
+
+    cursor: radioValue('cursor', 'auto'),
+    cloudMode: radioValue('cloudMode', 'off'),
+    projectId: $('projectId').value.trim(),
+
+    compilerEnabled: $('compilerEnabled').checked,
+    warpTimer: $('warpTimer').checked,
+    customCSS: $('customCSS').value,
+    customJS: $('customJS').value,
+    packagedRuntime: $('packagedRuntime').checked,
+    // Upstream doubles the default when this is ticked; so do we.
+    maxTextureDimension: $('bigTexture').checked ? 4096 : 2048,
+
+    preload: $('preload').checked,
+    optimizePng: $('optimizePng').checked,
+    noDeflate: $('noDeflate').checked,
+
+    width: num('width', 640),
+    height: num('height', 480),
+    devtools: $('devtools').checked,
+    build: $('build').checked
+  };
+};
+
+const CHECKBOXES = [
+  'turbo', 'interpolation', 'highQualityPen', 'closeWhenStopped',
+  'autoplay', 'progressBar', 'controlGreenFlag', 'controlStopAll', 'controlPause',
+  'controlFullscreen', 'editableLists', 'compilerEnabled', 'warpTimer',
+  'packagedRuntime', 'preload', 'optimizePng', 'noDeflate', 'devtools', 'build'
+];
 
 const writeOptions = (incoming) => {
   const o = Object.assign({}, DEFAULTS, incoming || {});
-  const target = o.target === 'exe' ? 'exe' : 'html';
-  document.querySelector(`input[name="target"][value="${target}"]`).checked = true;
+
+  pickRadio('target', o.target === 'exe' ? 'exe' : 'html', ['html', 'exe'], 'html');
+  pickRadio('resizeMode', o.resizeMode, ['preserve-ratio', 'stretch', 'dynamic-resize'], 'preserve-ratio');
+  pickRadio('cursor', o.cursor === 'none' ? 'none' : 'auto', ['auto', 'none'], 'auto');
+  pickRadio('cloudMode', o.cloudMode === 'local' ? 'local' : 'off', ['off', 'local'], 'off');
+
   $('mode').value = o.mode === 'tw' ? 'tw' : 'fast';
-  $('title').value = o.title || '';
-  $('turbo').checked = !!o.turbo;
-  $('autoplay').checked = !!o.autoplay;
+  $('title').value = o.title == null ? '' : String(o.title);
   $('framerate').value = String(o.framerate);
   $('username').value = String(o.username);
-  $('preload').checked = !!o.preload;
-  $('optimizePng').checked = o.optimizePng !== false;
-  $('noDeflate').checked = !!o.noDeflate;
+  $('stageWidth').value = String(o.stageWidth);
+  $('stageHeight').value = String(o.stageHeight);
+  $('loadingText').value = o.loadingText == null ? '' : String(o.loadingText);
+  $('projectId').value = o.projectId == null ? '' : String(o.projectId);
   $('width').value = String(o.width);
   $('height').value = String(o.height);
-  $('devtools').checked = o.devtools !== false;
-  $('build').checked = !!o.build;
+
+  $('accent').value = colorValue(o.accent, DEFAULTS.accent);
+  $('background').value = colorValue(o.background, DEFAULTS.background);
+  $('foreground').value = colorValue(o.foreground, DEFAULTS.foreground);
+  $('variableColor').value = colorValue(o.variableColor, DEFAULTS.variableColor);
+  $('listColor').value = colorValue(o.listColor, DEFAULTS.listColor);
+
+  $('customCSS').value = o.customCSS == null ? '' : String(o.customCSS);
+  $('customJS').value = o.customJS == null ? '' : String(o.customJS);
+
+  for (const id of CHECKBOXES) $(id).checked = !!o[id];
+
+  // The three derived switches. `=== false` rather than `!` so that a file which
+  // simply omits the key keeps the default instead of flipping it.
+  $('infiniteClones').checked = o.maxClones === Infinity || o.maxClones === 'Infinity';
+  $('removeFencing').checked = o.fencing === false || o.fencing === '0';
+  $('removeMiscLimits').checked = o.miscLimits === false || o.miscLimits === '0';
+  $('bigTexture').checked = Number(o.maxTextureDimension) > 2048;
+
   syncTarget();
 };
 
@@ -541,9 +819,15 @@ const say = (text, kind = '') => {
   $('status').className = kind;
 };
 
+const setDownloads = (html) => {
+  $('downloads').innerHTML = html || '';
+  $('downloads').classList.toggle('hidden', !html);
+};
+
 const clearStatus = () => {
   $('statusCard').classList.add('hidden');
   $('status').textContent = '';
+  setDownloads('');
 };
 
 const errorFrom = async (res) => {
@@ -554,7 +838,6 @@ const errorFrom = async (res) => {
 // --- health ----------------------------------------------------------------
 
 fetch('/api/health').then((r) => r.json()).then((health) => {
-  state.health = health;
   $('versionLine').textContent = `本地打包器 · Node ${health.node} · 零运行时依赖`;
 
   const problems = [];
@@ -583,12 +866,11 @@ const acceptFile = (file) => {
     return say(`只接受 .sb / .sb2 / .sb3 文件，收到的是 ${file.name}`, 'error');
   }
   state.file = file;
-  state.analysis = null;
   $('dropTitle').textContent = `已选择 ${file.name}（${bytes(file.size)}）`;
   $('loadBtn').disabled = false;
   $('packBtn').disabled = true;
   $('optionsRoot').classList.add('hidden');
-  $('projectCard').classList.add('hidden');
+  $('projectWrap').classList.add('hidden');
   $('loadHint').classList.remove('hidden');
   clearResult();
   clearStatus();
@@ -622,6 +904,10 @@ window.addEventListener('drop', (e) => e.preventDefault());
 const addStat = (label, value) => {
   $('stats').insertAdjacentHTML('beforeend', `<dt>${escapeHtml(label)}</dt><dd>${value}</dd>`);
 };
+const addProject = (label, value) => {
+  $('projectStats').insertAdjacentHTML('beforeend',
+    `<dt>${escapeHtml(label)}</dt><dd>${value}</dd>`);
+};
 
 $('loadBtn').addEventListener('click', async () => {
   if (!state.file || state.busy) return;
@@ -636,10 +922,9 @@ $('loadBtn').addEventListener('click', async () => {
     if (!res.ok) throw new Error(await errorFrom(res));
 
     const data = await res.json();
-    state.analysis = data.analysis;
-
     const a = data.analysis;
     const pngCount = data.byExtension.png || 0;
+
     $('projectStats').innerHTML = '';
     addProject('规模', `${a.targetCount} 个角色 · ${a.assetCount} 个素材（${bytes(a.assetBytes)}）`);
     addProject('原始文件', `${bytes(a.originalBytes)}，其中 project.json ${bytes(a.projectJSONBytes)}`);
@@ -650,14 +935,19 @@ $('loadBtn').addEventListener('click', async () => {
     addProject('可用优化', pngCount
       ? `${pngCount} 张 PNG 素材 —— 打包时会逐张尝试无损重压，能不能省下取决于素材本身的编码`
       : '没有 PNG 素材，重压那一步会是个空操作');
+    addProject('云变量', a.cloudVariableCount
+      ? `${a.cloudVariableCount} 个 ☁ 变量 —— 想让它跨刷新保留，把「云变量」选成存储在本地浏览器`
+      : '作品里没有云变量');
     if (a.extensions && a.extensions.length) addProject('扩展', a.extensions.join(' · '));
 
-    $('projectCard').classList.remove('hidden');
+    $('projectWrap').classList.remove('hidden');
     $('loadHint').classList.add('hidden');
     $('optionsRoot').classList.remove('hidden');
     $('packBtn').disabled = false;
     if (!$('title').value) $('title').value = state.file.name.replace(/\.[^.]+$/, '');
-    say(data.warning ? `已载入作品。${data.warning}` : `已载入作品，用时 ${elapsed(data.ms)}`, data.warning ? 'error' : '');
+    say(`${data.warning ? '已载入作品。' + data.warning : '已载入作品。'}` +
+      `${a.targetCount} 个角色 · ${bytes(a.assetBytes)} 素材 · 用时 ${elapsed(data.ms)}`,
+      data.warning ? 'error' : '');
   } catch (error) {
     say(String(error && error.message ? error.message : error), 'error');
   } finally {
@@ -666,21 +956,14 @@ $('loadBtn').addEventListener('click', async () => {
   }
 });
 
-function addProject(label, value) {
-  $('projectStats').insertAdjacentHTML('beforeend',
-    `<dt>${escapeHtml(label)}</dt><dd>${value}</dd>`);
-}
-
 // --- packing ---------------------------------------------------------------
 
 const clearResult = () => {
-  $('resultCard').classList.add('hidden');
-  $('downloadsHint').classList.remove('hidden');
-  $('kpi').innerHTML = '';
-  $('resultActions').innerHTML = '';
   $('stats').innerHTML = '';
-  $('logWrap').classList.add('hidden');
+  $('statsWrap').classList.add('hidden');
   $('log').textContent = '';
+  $('logWrap').classList.add('hidden');
+  setDownloads('');
   if (state.blobUrl) {
     URL.revokeObjectURL(state.blobUrl);
     state.blobUrl = null;
@@ -727,14 +1010,14 @@ const packHtml = () => runWithStatus('打包中…', async () => {
   state.blobUrl = URL.createObjectURL(blob);
 
   const a = report.project || {};
-  $('kpi').innerHTML = `<b>${bytes(report.htmlBytes)}</b> 产物 · 原始 sb3 ${bytes(a.originalBytes)} · ` +
-    `占 ${pct(report.htmlBytes, a.originalBytes)} · ${elapsed(report.ms)}`;
-  $('resultActions').innerHTML =
-    `<a href="${state.blobUrl}" download="${escapeHtml(name)}">下载 ${escapeHtml(name)}（${bytes(report.htmlBytes)}）</a>` +
-    ` · <a href="${state.blobUrl}" target="_blank" rel="noopener">在新标签页运行</a>`;
-  $('downloadsHint').classList.add('hidden');
-  $('resultCard').classList.remove('hidden');
+  setDownloads(
+    `<a href="${state.blobUrl}" download="${escapeHtml(name)}">下载 ${escapeHtml(name)}</a>` +
+    `（${bytes(report.htmlBytes)}） · ` +
+    `<a href="${state.blobUrl}" target="_blank" rel="noopener">在新标签页运行</a>`
+  );
 
+  addStat('产物', `${bytes(report.htmlBytes)}，占原始 sb3 的 ${pct(report.htmlBytes, a.originalBytes)}`);
+  addStat('用时', elapsed(report.ms));
   addStat('作品', `${a.targetCount} 个角色 · ${a.assetCount} 个素材（${bytes(a.assetBytes)}）`);
   addStat('运行时', escapeHtml(report.scaffolding) + (a.usesMusic ? '（含 music 扩展）' : ''));
   addStat('PNG 重压', a.png && a.png.optimized
@@ -746,8 +1029,9 @@ const packHtml = () => runWithStatus('打包中…', async () => {
       `（${report.container.assetsDeflated} 压缩 / ${report.container.assetsRaw} 原样，省 ${bytes(report.container.deflatedBytesSaved)}）`);
   }
   addStat('数据块', `${report.chunks} 块`);
+  $('statsWrap').classList.remove('hidden');
 
-  say(`完成，用时 ${elapsed(report.ms)}`);
+  say('打包完成');
   return state.blobUrl;
 });
 
@@ -758,29 +1042,27 @@ const packExe = () => runWithStatus('生成 exe 资源中…', async () => {
   const data = await res.json();
   const r = data.report;
 
-  $('kpi').innerHTML = `<b>${bytes(r.exeBytes || r.resourceBytes)}</b> ` +
-    `${r.exeBytes ? 'EXE' : (r.resourceGzip ? 'HTML 资源（gzip）' : 'HTML 资源')} · ` +
-    `未压缩 HTML ${bytes(r.htmlBytes)} · 占 sb3 ${pct(r.exeBytes || r.resourceBytes, r.project.originalBytes)} · ` +
-    `${elapsed(data.ms)}`;
-
   const links = data.artifacts.map((artifact) => {
-    const primary = artifact.name.endsWith('.exe') ? ' style="font-weight:bold"' : '';
-    return `<a${primary} href="/api/artifact?name=${encodeURIComponent(artifact.name)}" ` +
+    const bold = artifact.name.endsWith('.exe') ? ' style="font-weight:bold"' : '';
+    return `<a${bold} href="/api/artifact?name=${encodeURIComponent(artifact.name)}" ` +
       `download="${escapeHtml(artifact.name)}">${escapeHtml(artifact.name)}（${bytes(artifact.bytes)}）</a>`;
   });
-  $('resultActions').innerHTML = links.length ? links.join(' · ') : '<span class="muted">没有产物</span>';
-  $('downloadsHint').classList.add('hidden');
-  $('resultCard').classList.remove('hidden');
+  setDownloads(links.length ? links.join(' · ') : '<span class="muted">没有产物</span>');
 
+  addStat('用时', elapsed(data.ms));
+  addStat('产物', r.exeBytes
+    ? `EXE ${bytes(r.exeBytes)}，未压缩 HTML ${bytes(r.htmlBytes)}`
+    : `HTML 资源 ${bytes(r.resourceBytes)}${r.resourceGzip ? '（gzip -9）' : '（未压缩）'}`);
+  addStat('占 sb3', pct(r.exeBytes || r.resourceBytes, r.project.originalBytes));
   addStat('作品', `${r.project.targetCount} 个角色 · ${r.project.assetCount} 个素材`);
   addStat('运行时', escapeHtml(r.scaffolding));
   if (r.project.png && r.project.png.optimized) {
     addStat('PNG 重压', `${r.project.png.optimized} 张，省 ${bytes(r.project.png.before - r.project.png.after)}`);
   }
-  addStat('HTML 资源', `${bytes(r.resourceBytes)}${r.resourceGzip ? '（gzip -9）' : '（未压缩）'}`);
   if (r.hostBytes !== null && r.hostBytes !== undefined) {
     addStat('宿主代码', `${bytes(r.hostBytes)}<span class="muted">（exe 里不属于作品素材的部分）</span>`);
   }
+  $('statsWrap').classList.remove('hidden');
 
   const log = [];
   if (data.build.attempted) {
@@ -796,7 +1078,7 @@ const packExe = () => runWithStatus('生成 exe 资源中…', async () => {
   $('log').textContent = log.join('\n');
   $('logWrap').classList.remove('hidden');
 
-  say(`完成${r.exeBytes ? `，EXE ${bytes(r.exeBytes)}` : '（只生成了资源）'}，用时 ${elapsed(data.ms)}`);
+  say(`打包完成${r.exeBytes ? `，EXE ${bytes(r.exeBytes)}` : '（只生成了资源）'}`);
   return true;
 });
 
@@ -815,13 +1097,13 @@ $('previewBtn').addEventListener('click', async () => {
   const url = await packHtml();
   if (!url) { if (tab) tab.close(); return; }
   if (tab) tab.location.href = url;
-  else say('预览被浏览器拦截了，请用下方的「在新标签页运行」', 'error');
+  else say('预览被浏览器拦截了，请用状态行里的「在新标签页运行」', 'error');
 });
 
 // --- export / import / reset ----------------------------------------------
 
 $('exportBtn').addEventListener('click', () => {
-  const payload = JSON.stringify({app: 'bl-packager', version: 1, options: readOptions()}, null, 2);
+  const payload = JSON.stringify({app: 'bl-packager', version: 2, options: readOptions()}, null, 2);
   const url = URL.createObjectURL(new Blob([payload], {type: 'application/json'}));
   const anchor = document.createElement('a');
   anchor.href = url;

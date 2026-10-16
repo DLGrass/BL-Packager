@@ -27,7 +27,8 @@ const {
   human,
   writeExeResources,
   buildExe,
-  readBuiltExe
+  readBuiltExe,
+  loadOptionSet
 } = require('./lib/pipeline');
 
 const USAGE = `
@@ -38,6 +39,9 @@ Options:
       --title <text>     window title           (default: derived from the file name)
       --width <n>        window width           (default: 640)
       --height <n>       window height          (default: 480)
+      --options <spec>   JSON of the runtime/player options, or @file.json
+                         (the shape the web UI's 导出 button writes) — an exe is
+                         the same page in a WebView, so it takes the same ones
       --preload          warm compressed assets in parallel (see README)
       --no-deflate       store every container entry raw
       --no-optimize-png  keep PNG assets exactly as stored in the sb3. By
@@ -75,6 +79,7 @@ const parseArgs = (argv) => {
       case '--title': options.title = next(); break;
       case '--width': options.width = Number(next()); break;
       case '--height': options.height = Number(next()); break;
+      case '--options': options.options = next(); break;
       case '--preload': options.preload = true; break;
       case '--no-deflate': options.noDeflate = true; break;
       case '--no-optimize-png': options.noOptimizePng = true; break;
@@ -102,10 +107,11 @@ const run = () => {
 
   const inputPath = path.resolve(options.positional[0]);
   const input = fs.readFileSync(inputPath);
-  const title = options.title || defaultTitle(inputPath);
+  const optionSet = loadOptionSet(options.options);
+  const title = options.title || optionSet.title || defaultTitle(inputPath);
 
   // --- 1 + 2. HTML payload, compressed -------------------------------------
-  const {pack, htmlBytes, payload, gzipped, paths} = writeExeResources(input, {
+  const {pack, htmlBytes, payload, gzipped, paths} = writeExeResources(input, Object.assign({}, optionSet, {
     inputPath,
     title,
     width: options.width || 640,
@@ -114,10 +120,10 @@ const run = () => {
     gzipLevel: options.gzipLevel || 9,
     devtools: options.devtools !== false,
     probe: options.probe || null,
-    preload: !!options.preload,
-    noDeflate: !!options.noDeflate,
-    optimizePng: !options.noOptimizePng
-  });
+    preload: options.preload === undefined ? !!optionSet.preload : !!options.preload,
+    noDeflate: options.noDeflate === undefined ? !!optionSet.noDeflate : !!options.noDeflate,
+    optimizePng: options.noOptimizePng ? false : optionSet.optimizePng !== false
+  }));
 
   // --- 3. build ------------------------------------------------------------
   // Opt-in: some sandboxes block spawning cmd.exe from Node. Running

@@ -129,6 +129,31 @@ const waitForTarget = async (port, expectedUrl, timeoutMs = 20000) => {
   throw new Error('no page target appeared on the debug port');
 };
 
+// Every option the page offers, by the id of its control. Kept here rather than
+// scraped from the DOM so that a control disappearing is a failure and not just
+// a shorter list.
+const CONTROL_IDS = [
+  // 运行选项
+  'turbo', 'framerate', 'interpolation', 'highQualityPen', 'infiniteClones',
+  'removeFencing', 'removeMiscLimits', 'username', 'closeWhenStopped',
+  'stageWidth', 'stageHeight',
+  // 展示选项
+  'title', 'progressBar', 'loadingText', 'autoplay',
+  'controlGreenFlag', 'controlStopAll', 'controlPause', 'controlFullscreen',
+  'background', 'foreground', 'accent',
+  'editableLists', 'variableColor', 'listColor',
+  // 云变量
+  'projectId',
+  // 高级选项
+  'compilerEnabled', 'warpTimer', 'customCSS', 'customJS', 'packagedRuntime', 'bigTexture',
+  // 本打包器专用
+  'mode', 'optimizePng', 'noDeflate', 'preload',
+  // 运行环境 / 应用设置
+  'width', 'height', 'devtools', 'build'
+];
+
+const RADIO_NAMES = ['target', 'resizeMode', 'cursor', 'cloudMode'];
+
 const main = async () => {
   const sb3Path = path.resolve(arg('--sb3', path.join(ROOT, 'out', 'bench', 'bench.sb3')));
   const shotPath = arg('--shot', null);
@@ -148,10 +173,11 @@ const main = async () => {
     ? zlib.gzipSync(expectedHtml, {level: 9}).length
     : expectedHtml.length;
   // Without --build the page cannot offer an exe, so the first download is the
-  // resource itself. Match it by name rather than by position.
+  // resource itself. Match it by name rather than by position. The links live on
+  // the status line (`#downloads`), not in a result card.
   const artifactSelector = target === 'exe'
-    ? '#resultActions a[download="app.html.gz"]'
-    : '#resultActions a[download]';
+    ? '#downloads a[download="app.html.gz"]'
+    : '#downloads a[download]';
 
   const server = createServer();
   const uiPort = await listen(server, 0, '127.0.0.1');
@@ -182,6 +208,14 @@ const main = async () => {
     cdp = await connect(pageTarget.webSocketDebuggerUrl);
     await cdp.send('Runtime.enable');
     await cdp.send('DOM.enable');
+
+    // The report lives in collapsed <details> now, so innerText is empty until
+    // they are opened. A user clicks them; so do we.
+    const readText = async (selector) => {
+      await cdp.evaluate(`document.querySelectorAll('details').forEach((d) => { d.open = true; })`);
+      return cdp.evaluate(`(document.querySelector('${selector}') || {}).innerText || ''`)
+        .then((text) => text.replace(/\s+/g, ' ').trim());
+    };
 
     if (theme === 'light' || theme === 'dark') {
       // The page picks its theme from <head>, before the first paint, so it has
@@ -226,6 +260,59 @@ const main = async () => {
       throw new Error(`#fileInput never appeared — ${seen}`);
     }
 
+    // --- structural checks -------------------------------------------------
+    // The page was rebuilt against TurboWarp's option inventory: 作品 and
+    // 打包结果 are gone, the download link sits on the status line, and every
+    // option the pipeline honours has a control. All three are easy to undo by
+    // accident, so they are asserted rather than eyeballed.
+    const structure = JSON.parse(await cdp.evaluate(`JSON.stringify({
+      removed: ['projectCard', 'resultCard', 'downloadsHint'].filter((id) => document.getElementById(id)),
+      downloadsInStatus: !!document.querySelector('#statusCard #downloads'),
+      missing: ${JSON.stringify(CONTROL_IDS)}.filter((id) => !document.getElementById(id)),
+      missingRadios: ${JSON.stringify(RADIO_NAMES)}.filter((name) =>
+        !document.querySelector('input[name="' + name + '"]'))
+    })`));
+    if (structure.removed.length) {
+      throw new Error(`cards that should be gone are still in the page: ${structure.removed.join(', ')}`);
+    }
+    if (!structure.downloadsInStatus) throw new Error('#downloads is not on the status line');
+    if (structure.missing.length || structure.missingRadios.length) {
+      throw new Error(`options with no control: ${structure.missing.concat(structure.missingRadios).join(', ')}`);
+    }
+    console.log(`page        ${CONTROL_IDS.length + RADIO_NAMES.length} option controls present, ` +
+      '2 cards removed, download link on the status line');
+
+    // The three checkboxes that are not wire options have to survive the trip
+    // through readOptions(), and 重置全部 has to put them back.
+    const derived = JSON.parse(await cdp.evaluate(`(() => {
+      document.getElementById('infiniteClones').checked = true;
+      document.getElementById('removeFencing').checked = true;
+      document.getElementById('bigTexture').checked = true;
+      document.querySelector('input[name="cursor"][value="none"]').checked = true;
+      document.querySelector('input[name="cloudMode"][value="local"]').checked = true;
+      const on = readOptions();
+      document.getElementById('resetBtn').click();
+      const off = readOptions();
+      return JSON.stringify({
+        on: {
+          infinite: on.maxClones === Infinity, fencing: on.fencing,
+          texture: on.maxTextureDimension, cursor: on.cursor, cloud: on.cloudMode
+        },
+        off: {
+          clones: off.maxClones, fencing: off.fencing,
+          texture: off.maxTextureDimension, cursor: off.cursor, cloud: off.cloudMode
+        }
+      });
+    })()`));
+
+    const expectedOn = {infinite: true, fencing: false, texture: 4096, cursor: 'none', cloud: 'local'};
+    const expectedOff = {clones: 300, fencing: true, texture: 2048, cursor: 'auto', cloud: 'off'};
+    if (JSON.stringify(derived.on) !== JSON.stringify(expectedOn) ||
+        JSON.stringify(derived.off) !== JSON.stringify(expectedOff)) {
+      throw new Error(`the derived switches do not round trip: ${JSON.stringify(derived)}`);
+    }
+    console.log('page        derived switches map to maxClones/fencing/maxTextureDimension and reset');
+
     // A real file, handed to the input the drop handler feeds.
     await cdp.send('DOM.setFileInputFiles', {files: [sb3Path], nodeId});
     await sleep(300);
@@ -256,8 +343,7 @@ const main = async () => {
         options: !document.getElementById('optionsRoot').classList.contains('hidden'),
         packable: !document.getElementById('packBtn').disabled,
         failed: document.getElementById('statusCard').classList.contains('error'),
-        title: document.getElementById('title').value,
-        project: document.getElementById('projectStats').innerText.replace(/\\s+/g, ' ')
+        title: document.getElementById('title').value
       })`));
       if (armed.options && armed.packable) break;
       if (armed.failed) {
@@ -267,7 +353,7 @@ const main = async () => {
     }
     if (!armed.options || !armed.packable) throw new Error('the options never appeared after loading');
     console.log(`page        loaded, title field "${armed.title}"`);
-    console.log(`project     ${armed.project}`);
+    console.log(`project     ${await readText('#projectStats')}`);
 
     if (target === 'exe') {
       await cdp.evaluate(`document.querySelector('input[name="target"][value="exe"]').click()`);
@@ -293,11 +379,11 @@ const main = async () => {
     while (Date.now() < deadline) {
       status = await cdp.evaluate(`document.getElementById('status').textContent`);
       failed = await cdp.evaluate(`document.getElementById('statusCard').classList.contains('error')`);
-      if (status.startsWith('完成') || failed) break;
+      if (status.includes('打包完成') || failed) break;
       await sleep(400);
     }
     if (failed) throw new Error(`the page reported a failure: ${status}`);
-    if (!status.startsWith('完成')) throw new Error(`packing did not finish: ${status}`);
+    if (!status.includes('打包完成')) throw new Error(`packing did not finish: ${status}`);
 
     // Pull the artifact back out of the page: this is the browser's own copy,
     // produced by its own fetch -> blob -> anchor path.
@@ -309,24 +395,24 @@ const main = async () => {
       return JSON.stringify({
         bytes,
         download: link ? link.getAttribute('download') : null,
-        links: [...document.querySelectorAll('#resultActions a')].map((a) => a.getAttribute('download')),
+        links: [...document.querySelectorAll('#downloads a')].map((a) => a.getAttribute('download')),
         status: document.getElementById('status').textContent,
-        kpi: document.getElementById('kpi').innerText.replace(/\\s+/g, ' '),
-        stats: document.getElementById('stats').innerText.replace(/\\s+/g, ' '),
-        log: document.getElementById('log').innerText.replace(/\\s+/g, ' ').slice(0, 300)
+        onStatusLine: !!document.querySelector('#statusCard #downloads a[download]')
       });
     })()`, true));
 
     if (result.bytes === null) {
       throw new Error(`no "${artifactSelector}" link — status "${result.status}", ` +
-        `links ${JSON.stringify(result.links)}, log "${result.log}"`);
+        `links ${JSON.stringify(result.links)}`);
     }
+    if (!result.onStatusLine) throw new Error('the download link is not on the status line');
 
     console.log(`page        ${status}`);
-    console.log(`kpi         ${result.kpi}`);
+    console.log(`report      ${await readText('#stats')}`);
     console.log(`download    ${result.download}  ${result.bytes} bytes`);
     console.log(`cli         ${expectedBytes} bytes`);
-    if (result.log) console.log(`log         ${result.log}`);
+    const buildLog = await readText('#log');
+    if (buildLog) console.log(`log         ${buildLog}`);
 
     const matches = result.bytes === expectedBytes;
     console.log(matches

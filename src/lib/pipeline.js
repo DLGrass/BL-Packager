@@ -34,6 +34,57 @@ const SCAFFOLDING_FULL = 'scaffolding-full.js';
 const SCAFFOLDING_MIN = 'scaffolding-min.js';
 
 /**
+ * Options that travel straight from a front end to the rendered page. Each one
+ * is honoured by the inlined scaffolding (see html.js); nothing is listed here
+ * that would be inert. Keeping the list in one place is what stops the CLI, the
+ * exe path and the web UI from each supporting a different subset.
+ */
+const RENDER_OPTION_KEYS = [
+  // runtime
+  'interpolation', 'highQualityPen', 'maxClones', 'fencing', 'miscLimits',
+  'compilerEnabled', 'warpTimer', 'stageWidth', 'stageHeight', 'resizeMode',
+  'maxTextureDimension', 'username', 'closeWhenStopped', 'cursor',
+  'cloudMode', 'projectId',
+  // player
+  'accent', 'background', 'foreground', 'loadingText', 'progressBar',
+  'controlGreenFlag', 'controlStopAll', 'controlPause', 'controlFullscreen',
+  'editableLists', 'variableColor', 'listColor', 'packagedRuntime',
+  'customCSS', 'customJS'
+];
+
+/** Only the keys the caller actually supplied — undefined must not win. */
+const pickRenderOptions = (source = {}) => {
+  const out = {};
+  for (const key of RENDER_OPTION_KEYS) {
+    if (source[key] !== undefined) out[key] = source[key];
+  }
+  return out;
+};
+
+/**
+ * Read an option set: the JSON itself, or `@path`, and tolerating the
+ * `{app, version, options}` wrapper the web UI writes. Shared by both CLIs so
+ * the file the page exports is exactly what they accept.
+ */
+const loadOptionSet = (spec) => {
+  if (!spec) return {};
+  const text = String(spec).startsWith('@')
+    ? fs.readFileSync(path.resolve(String(spec).slice(1)), 'utf8')
+    : String(spec);
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`option set is not valid JSON: ${error.message}`);
+  }
+  const source = parsed && typeof parsed === 'object' && parsed.options ? parsed.options : parsed;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    throw new Error('an option set must be a JSON object');
+  }
+  return source;
+};
+
+/**
  * Where a given repo root keeps its exe build output. Exposed so callers (the
  * web UI, the tests) can be pointed at a scratch root instead of clobbering the
  * real exe/build/ — a test run writes app.html.gz, and that file is the payload
@@ -179,7 +230,6 @@ const renderProjectHtml = (prepared, options = {}) => {
     autoplay = false,
     turbo = false,
     framerate = 30,
-    username = 'player####',
     preload = false,
     // Handing the VM views into the decoded container is a documented
     // regression (scratch-audio then copies the whole thing per sound). It is
@@ -196,20 +246,19 @@ const renderProjectHtml = (prepared, options = {}) => {
     ? 0
     : (containerStats.assetsDeflated + (containerStats.indexDeflated ? 1 : 0));
 
-  const {html, stats} = renderHtml(project, payload, {
+  const {html, stats} = renderHtml(project, payload, Object.assign({
     mode,
     title: title || defaultTitle(inputPath),
     autoplay,
     turbo,
     framerate,
-    username,
     preload,
     copyAssets: !viewAssets,
     instrument,
     deflatedEntries,
     scaffoldingSource,
     buildInfo: `runtime: ${path.basename(scaffoldingSource)}`
-  });
+  }, pickRenderOptions(options)));
 
   return {html, stats, payloadBytes: payload.length, deflatedEntries};
 };
@@ -261,23 +310,21 @@ const writeExeResources = (input, options = {}) => {
     autoplay = false,
     turbo = false,
     framerate = 30,
-    username = 'player####',
     root = ROOT
   } = options;
 
-  const pack = packToHtml(input, {
+  const pack = packToHtml(input, Object.assign({
     mode: 'fast',
     inputPath,
     title,
     autoplay,
     turbo,
     framerate,
-    username,
     preload,
     noDeflate,
     optimizePng,
     root
-  });
+  }, pickRenderOptions(options)));
 
   const htmlBytes = Buffer.from(pack.html);
   const gzipped = gzip ? zlib.gzipSync(htmlBytes, {level: gzipLevel}) : null;
@@ -373,5 +420,8 @@ module.exports = {
   writeExeResources,
   buildExe,
   readBuiltExe,
-  hasScaffolding
+  hasScaffolding,
+  RENDER_OPTION_KEYS,
+  pickRenderOptions,
+  loadOptionSet
 };

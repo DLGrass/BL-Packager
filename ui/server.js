@@ -79,13 +79,55 @@ const boundedInt = (params, name, fallback, min, max) => {
   return Math.min(max, Math.max(min, value));
 };
 
-/** The player/runtime options both targets accept, read from one place. */
-const playerOptions = (params) => ({
-  autoplay: flag(params, 'autoplay'),
-  turbo: flag(params, 'turbo'),
-  framerate: boundedInt(params, 'framerate', 30, 0, 240),
-  username: str(params, 'username', 'player####')
-});
+/** Query-string -> render option types. One table, so a new option is one line. */
+const BOOL_PARAMS = [
+  'turbo', 'interpolation', 'highQualityPen', 'fencing', 'miscLimits',
+  'compilerEnabled', 'warpTimer', 'closeWhenStopped', 'autoplay', 'progressBar',
+  'controlGreenFlag', 'controlStopAll', 'controlPause', 'controlFullscreen',
+  'editableLists', 'packagedRuntime'
+];
+
+/** name -> [min, max, fallback] */
+const NUMBER_PARAMS = {
+  framerate: [0, 240, 30],
+  maxClones: [1, 1000000, 300],
+  stageWidth: [1, 4096, 480],
+  stageHeight: [1, 4096, 360],
+  maxTextureDimension: [1, 16384, 2048]
+};
+
+const STRING_PARAMS = [
+  'username', 'loadingText', 'resizeMode', 'cursor',
+  'accent', 'background', 'foreground', 'variableColor', 'listColor',
+  'customCSS', 'customJS', 'cloudMode', 'projectId'
+];
+
+/**
+ * The player/runtime options both targets accept, read from one place.
+ *
+ * A parameter that is absent is left out of the result entirely, so html.js's
+ * own default applies. Filling in our default here instead would look harmless
+ * and then quietly win over anything else that set the same option.
+ */
+const playerOptions = (params) => {
+  const out = {};
+  for (const key of BOOL_PARAMS) {
+    if (params.has(key)) out[key] = flag(params, key);
+  }
+  for (const [key, [min, max, fallback]] of Object.entries(NUMBER_PARAMS)) {
+    if (!params.has(key)) continue;
+    // "Infinity" is how the page spells 无限克隆; boundedInt would reject it.
+    if (key === 'maxClones' && params.get(key) === 'Infinity') {
+      out[key] = Infinity;
+      continue;
+    }
+    out[key] = boundedInt(params, key, fallback, min, max);
+  }
+  for (const key of STRING_PARAMS) {
+    if (params.has(key)) out[key] = str(params, key, '');
+  }
+  return out;
+};
 
 /** Keep characters Windows refuses in a file name out of the download name. */
 const safeFileName = (name) => String(name).replace(/[\\/:*?"<>|\r\n]+/g, '_').replace(/^\.+/, '').trim() || 'project';

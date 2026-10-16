@@ -5,12 +5,18 @@
 //
 //   node src/pack.js project.sb3 -o out.html
 //   node src/pack.js project.sb3 --mode=both --out-dir out --instrument
+//   node src/pack.js project.sb3 --options @opts.json
 //
 // Modes:
 //   fast (default)  embed a BLPK container: index lookup + no JS inflate
 //   tw              embed the raw sb3 and let Scaffolding.JSZip unpack it
 //                   (TurboWarp's own strategy, kept for A/B measurement)
 //   both            emit both, for benchmarking
+//
+// Most of the runtime/player settings are not flags: there are thirty of them,
+// they all take simple values, and the web UI can already export exactly this
+// shape as JSON. `--options` takes that file (or the JSON itself), so the two
+// front ends cannot drift and adding an option does not mean adding a flag.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -20,7 +26,8 @@ const {
   defaultTitle,
   human,
   prepareProject,
-  renderProjectHtml
+  renderProjectHtml,
+  loadOptionSet
 } = require('./lib/pipeline');
 
 const USAGE = `
@@ -30,6 +37,8 @@ Options:
   -o, --out <file>        output html path (single mode)
       --out-dir <dir>     output directory when --mode=both
       --mode <m>          fast | tw | both            (default: fast)
+      --options <spec>    JSON of the runtime/player options, or @file.json
+                          (the shape the web UI's 导出 button writes)
       --scaffolding <f>   override the runtime script
       --full-runtime      use scaffolding-full even if the project has no music
       --title <text>      window title                (default: derived from the file name)
@@ -56,7 +65,7 @@ Options:
 `.trim();
 
 const parseArgs = (argv) => {
-  const options = {mode: 'fast', positional: []};
+  const options = {positional: []};
   // Normalise --key=value into --key value so both spellings work.
   const flattened = [];
   for (const arg of argv) {
@@ -78,6 +87,7 @@ const parseArgs = (argv) => {
       case '-o': case '--out': options.out = next(); break;
       case '--out-dir': options.outDir = next(); break;
       case '--mode': options.mode = next(); break;
+      case '--options': options.options = next(); break;
       case '--scaffolding': options.scaffolding = next(); break;
       case '--full-runtime': options.fullRuntime = true; break;
       case '--title': options.title = next(); break;
@@ -102,7 +112,21 @@ const parseArgs = (argv) => {
   return options;
 };
 
+/** `--options` accepts the JSON itself or `@path`; pipeline.loadOptionSet reads it. */
+
 const pickScaffoldingSource = (options) => (options.scaffolding ? path.resolve(options.scaffolding) : null);
+
+/**
+ * Flags beat the option set, and an absent flag never overrides it: `--options`
+ * is the broad channel, the flags are the ones worth typing by hand.
+ */
+const flagOverrides = (options) => {
+  const out = {};
+  for (const key of ['title', 'autoplay', 'turbo', 'framerate', 'username', 'preload']) {
+    if (options[key] !== undefined) out[key] = options[key];
+  }
+  return out;
+};
 
 const run = () => {
   const options = parseArgs(process.argv.slice(2));
@@ -111,41 +135,38 @@ const run = () => {
     process.exit(options.help ? 0 : 1);
   }
 
+  const optionSet = loadOptionSet(options.options);
   const inputPath = path.resolve(options.positional[0]);
   const input = fs.readFileSync(inputPath);
 
   const prepared = prepareProject(input, {
-    fullRuntime: !!options.fullRuntime,
+    fullRuntime: options.fullRuntime || optionSet.fullRuntime === true,
     scaffolding: pickScaffoldingSource(options),
-    noDeflate: !!options.noDeflate,
-    deflateIndex: !!options.deflateIndex,
-    optimizePng: !options.noOptimizePng,
+    noDeflate: options.noDeflate || optionSet.noDeflate === true,
+    deflateIndex: options.deflateIndex || optionSet.deflateIndex === true,
+    optimizePng: options.noOptimizePng ? false : optionSet.optimizePng !== false,
     onWarn: (message) => console.warn(`warning: ${message}`)
   });
   const {project, containerStats, scaffoldingSource} = prepared;
 
-  const modes = options.mode === 'both' ? ['fast', 'tw'] : [options.mode];
+  const mode = options.mode || optionSet.mode || 'fast';
+  const renderOptions = Object.assign({}, optionSet, flagOverrides(options));
+  const modes = mode === 'both' ? ['fast', 'tw'] : [mode];
   const results = [];
 
-  for (const mode of modes) {
-    const rendered = renderProjectHtml(prepared, {
-      mode,
+  for (const outputMode of modes) {
+    const rendered = renderProjectHtml(prepared, Object.assign({}, renderOptions, {
+      mode: outputMode,
       inputPath,
-      title: options.title,
-      autoplay: !!options.autoplay,
-      turbo: !!options.turbo,
-      framerate: options.framerate || 30,
-      username: options.username || 'player####',
-      preload: !!options.preload,
       viewAssets: !!options.viewAssets,
       instrument: !!options.instrument
-    });
+    }));
 
     let outPath;
-    if (options.mode === 'both' || (!options.out && options.outDir)) {
+    if (mode === 'both' || (!options.out && options.outDir)) {
       const dir = path.resolve(options.outDir || path.join(ROOT, 'out'));
       fs.mkdirSync(dir, {recursive: true});
-      outPath = path.join(dir, `${defaultTitle(inputPath)}.${mode}.html`);
+      outPath = path.join(dir, `${defaultTitle(inputPath)}.${outputMode}.html`);
     } else {
       outPath = path.resolve(options.out || path.join(ROOT, 'out', `${defaultTitle(inputPath)}.html`));
       fs.mkdirSync(path.dirname(outPath), {recursive: true});
@@ -154,13 +175,13 @@ const run = () => {
     fs.writeFileSync(outPath, rendered.html);
 
     results.push({
-      mode,
+      mode: outputMode,
       out: outPath,
       htmlBytes: rendered.html.length,
       payloadBytes: rendered.payloadBytes,
       chunks: rendered.stats.chunks,
       deflatedEntries: rendered.deflatedEntries,
-      preload: !!options.preload,
+      preload: !!renderOptions.preload,
       copyAssets: !options.viewAssets
     });
   }
@@ -170,6 +191,7 @@ const run = () => {
     project: project.analysis,
     container: containerStats,
     scaffolding: path.basename(scaffoldingSource),
+    options: renderOptions,
     outputs: results
   };
 

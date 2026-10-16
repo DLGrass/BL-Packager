@@ -271,6 +271,14 @@ const loadSb3 = (input, options = {}) => {
       extensionURLs: projectData.extensionURLs || {},
       rootPrefix: projectEntryName === 'project.json' ? '' : projectEntryName.replace(/project\.json$/, ''),
       targetCount: projectData.targets.length,
+      // Mirrors what the VM keys off: the flag, not the ☁ in the name.
+      cloudVariableCount: projectData.targets.reduce((total, target) => {
+        const variables = target.variables || {};
+        for (const name of Object.keys(variables)) {
+          if (variables[name].isCloud) total++;
+        }
+        return total;
+      }, 0),
       assetCount: assets.size,
       assetBytes,
       projectJSONBytes: projectJSONBytes.length,

@@ -555,6 +555,150 @@ const main = async () => {
   });
 
   // -------------------------------------------------------------------------
+  section('[html: every option reaches the page, or is refused]');
+  // -------------------------------------------------------------------------
+  // The UI, the two CLIs and the exe payload all funnel into renderHtml(), so an
+  // option that the UI offers but the renderer ignores is a lie told to the
+  // user. Each case below flips one option and asserts the exact line it is
+  // supposed to turn into — the same line TurboWarp's packager.js emits.
+  {
+    const {renderHtml, normalizeOptions} = require('../src/lib/html');
+    const {pickRenderOptions, loadOptionSet, RENDER_OPTION_KEYS} = require('../src/lib/pipeline');
+
+    const png = encodePng(16, 16, canvasRows(16, 16), {filter: 0, level: 6});
+    const pngName = `${md5(png)}.png`;
+    const sb3 = writeZip([
+      {
+        name: 'project.json',
+        data: Buffer.from(JSON.stringify({
+          targets: [
+            {
+              isStage: true, name: 'Stage',
+              variables: {'☁ score': {name: '☁ score', value: 0, isCloud: true}},
+              lists: {}, broadcasts: {}, blocks: {}, comments: [], sounds: [],
+              costumes: [{assetId: pngName.replace(/\.png$/, ''), name: 'backdrop1', md5ext: pngName,
+                dataFormat: 'png', rotationCenterX: 0, rotationCenterY: 0}],
+              volume: 100, layerOrder: 0, tempo: 60, videoTransparency: 50, videoState: 'off'
+            }
+          ],
+          monitors: [], extensions: [], meta: {semver: '3.0.0', vm: '0.0.0'}
+        }), 'utf8')
+      },
+      {name: pngName, data: png}
+    ]);
+
+    const project = loadSb3(sb3, {optimizePng: false, fullRuntime: false});
+    const scaffoldingSource = path.join(ROOT, 'vendor', 'scaffolding-min.js');
+    // mode 'tw' keeps the payload the original sb3, so these assertions are about
+    // the options and nothing else.
+    const render = (options) => renderHtml(project, sb3,
+      Object.assign({mode: 'tw', scaffoldingSource}, options)).html.toString('utf8');
+
+    const CASES = [
+      ['turbo', {turbo: true}, /vm\.setTurboMode\(true\)/],
+      ['framerate', {framerate: 120}, /vm\.setFramerate\(120\)/],
+      ['interpolation', {interpolation: true}, /setInterpolation\(true\)/],
+      ['highQualityPen', {highQualityPen: true}, /setUseHighQualityRender\(true\)/],
+      ['maxClones = Infinity', {maxClones: Infinity}, /maxClones: Infinity/],
+      ['fencing off', {fencing: false}, /fencing: false/],
+      ['miscLimits off', {miscLimits: false}, /miscLimits: false/],
+      ['username', {username: 'bl'}, /scaffolding\.setUsername\("bl"/],
+      ['resizeMode stretch', {resizeMode: 'stretch'}, /scaffolding\.resizeMode = "stretch"/],
+      ['resizeMode dynamic-resize', {resizeMode: 'dynamic-resize'}, /resizeMode = "dynamic-resize"/],
+      ['stage size', {stageWidth: 640, stageHeight: 480}, /scaffolding\.width = 640;/],
+      ['cursor none', {cursor: 'none'}, /\.sc-canvas \{ cursor: none; \}/],
+      ['accent', {accent: '#123456'}, /setAccentColor\("#123456"\)/],
+      ['background', {background: '#010203'}, /background: #010203;/],
+      ['foreground', {foreground: '#0a0b0c'}, /color: #0a0b0c;/],
+      ['loadingText', {loadingText: '等一会儿'}, /class="loading-text">等一会儿</],
+      ['autoplay', {autoplay: true}, /scaffolding\.start\(\);\s*\} else \{/],
+      ['controlGreenFlag', {controlGreenFlag: true}, /greenFlagButton/],
+      ['controlStopAll', {controlStopAll: true}, /stopAllButton/],
+      ['controlPause', {controlPause: true}, /RUNTIME_PAUSED/],
+      ['controlFullscreen', {controlFullscreen: true}, /fullscreenButton/],
+      ['editableLists', {editableLists: true}, /scaffolding\.editableLists = true/],
+      ['packagedRuntime off', {packagedRuntime: false}, /usePackagedRuntime = false/],
+      ['variableColor', {variableColor: '#111213'}, /background-color: #111213;/],
+      ['listColor', {listColor: '#141516'}, /background-color: #141516;/],
+      ['customCSS', {customCSS: '.bl-probe{color:red}'}, /\.bl-probe\{color:red\}/],
+      ['customJS', {customJS: 'window.blProbe = 1;'}, /window\.blProbe = 1;/],
+      ['compiler off', {compilerEnabled: false}, /enabled: false/],
+      ['warpTimer', {warpTimer: true}, /warpTimer: true/],
+      ['maxTextureDimension', {maxTextureDimension: 4096}, /setMaxTextureDimension\(4096\)/],
+      ['closeWhenStopped', {closeWhenStopped: true}, /vm\.runtime\.on\('PROJECT_RUN_STOP'/],
+      ['cloudMode local', {cloudMode: 'local', projectId: 'bl-probe'},
+        /new Scaffolding\.Cloud\.LocalStorageProvider\("cloudvariables:bl-probe"\)/]
+    ];
+
+    await test('each option turns into the scaffolding call upstream emits', () => {
+      const stale = [];
+      for (const [name, options, needle] of CASES) {
+        const html = render(options);
+        if (!needle.test(html)) stale.push(name);
+      }
+      assert.deepStrictEqual(stale, [], `options with no effect: ${stale.join(', ')}`);
+    });
+
+    await test('the two switches that are the absence of a call really are absent', () => {
+      // progressBar and the cloud provider are only visible by what is NOT
+      // there when they are off, so a needle test cannot cover them. The CSS
+      // rule is emitted either way, so the needle has to be the markup.
+      assert.match(render({progressBar: true}), /class="progress-bar-outer"/);
+      assert.ok(!/class="progress-bar-outer"/.test(render({progressBar: false})));
+      // The scaffolding bundle itself defines `addCloudProvider`, so the needle
+      // has to be the call we emit, not the method name.
+      const PROVIDER = /scaffolding\.addCloudProvider\(new Scaffolding\.Cloud\.LocalStorageProvider/;
+      assert.match(render({cloudMode: 'local'}), PROVIDER);
+      assert.ok(!PROVIDER.test(render({cloudMode: 'off'})));
+      // Off by default: a project that never asked for cloud storage must not
+      // start writing to localStorage.
+      assert.ok(!PROVIDER.test(render({})));
+    });
+
+    await test('a value the renderer cannot honour falls back instead of lying', () => {
+      // 'ws' is upstream's default mode; this packager has no WebSocket
+      // provider, so accepting the string and doing nothing would be the worst
+      // possible outcome — silently no cloud variables at all.
+      assert.strictEqual(normalizeOptions({cloudMode: 'ws'}).cloudMode, 'off');
+      assert.strictEqual(normalizeOptions({cursor: 'custom'}).cursor, 'auto');
+      assert.strictEqual(normalizeOptions({resizeMode: 'stretch-screen'}).resizeMode, 'preserve-ratio');
+      assert.strictEqual(normalizeOptions({accent: 'cornflowerblue'}).accent, '#4d97ff');
+      assert.strictEqual(normalizeOptions({framerate: 9999}).framerate, 240);
+      assert.strictEqual(normalizeOptions({maxTextureDimension: 1e9}).maxTextureDimension, 16384);
+      assert.strictEqual(normalizeOptions({maxClones: Infinity}).maxClones, Infinity);
+      assert.strictEqual(normalizeOptions({maxClones: 'lots'}).maxClones, 300);
+    });
+
+    await test('the option file the page exports is one the CLIs accept', () => {
+      // Exactly what ui/index.html writes: a v2 wrapper in the wire format,
+      // containing both the pass-through keys and the UI-only ones.
+      const exported = JSON.stringify({
+        app: 'bl-packager',
+        version: 2,
+        options: {mode: 'fast', turbo: true, cloudMode: 'local', projectId: 'bl-probe',
+          maxClones: 300, fencing: true, packagedRuntime: true, preload: true, optimizePng: true}
+      });
+      const spec = loadOptionSet(exported);
+      assert.strictEqual(spec.cloudMode, 'local');
+      assert.strictEqual(spec.projectId, 'bl-probe');
+
+      const passed = pickRenderOptions(spec);
+      assert.strictEqual(passed.cloudMode, 'local');
+      assert.strictEqual(passed.projectId, 'bl-probe');
+      // UI-only keys must not leak into the renderer's option bag...
+      for (const key of Object.keys(passed)) {
+        assert.ok(RENDER_OPTION_KEYS.includes(key), `${key} is not a render option`);
+      }
+      assert.ok(!('mode' in passed), 'mode is a pipeline argument, not a render option');
+      assert.ok(!('preload' in passed), 'preload is a pipeline argument, not a render option');
+      assert.ok(!('optimizePng' in passed), 'optimizePng is a pipeline argument, not a render option');
+      // ...and the option the page chose must be the one that gets rendered.
+      assert.match(render(passed),
+        /scaffolding\.addCloudProvider\(new Scaffolding\.Cloud\.LocalStorageProvider/);
+    });
+  }
+
+  // -------------------------------------------------------------------------
   section('[ui server: the HTTP path is the same pipeline]');
   // -------------------------------------------------------------------------
   // The web UI is a third front end onto src/lib/pipeline.js. These tests drive
@@ -641,9 +785,34 @@ const main = async () => {
         assert.strictEqual(data.scaffolding, 'scaffolding-min.js');
         assert.strictEqual(data.scaffoldingAvailable.min, true);
         assert.strictEqual(data.warning, null);
+        assert.strictEqual(data.analysis.cloudVariableCount, 0);
         // Inspecting must stay cheap: the expensive PNG re-encode is the
         // packager's job, not the "what is in this file?" screen's.
         assert.strictEqual(data.analysis.png.optimized, 0);
+      });
+
+      await test('POST /api/inspect counts cloud variables', async () => {
+        const stage = (variables) => ({
+          name: 'project.json',
+          data: Buffer.from(JSON.stringify({
+            targets: [{
+              isStage: true, name: 'Stage', variables, lists: {}, broadcasts: {},
+              blocks: {}, comments: {}, costumes: [], sounds: [], volume: 100,
+              layerOrder: 0, tempo: 60, videoTransparency: 50, videoState: 'off'
+            }],
+            monitors: [], extensions: [], meta: {semver: '3.0.0', vm: '0.0.0'}
+          }), 'utf8')
+        });
+
+        const cloud = writeZip([stage({
+          '☁ hi': {name: '☁ hi', value: 0, isCloud: true},
+          'score': {name: 'score', value: 0, isCloud: false}
+        })]);
+
+        const res = await post('/api/inspect', cloud, '?filename=cloud.sb3');
+        assert.strictEqual(res.status, 200);
+        // The flag, not the ☁ in the name — that is what the VM keys off.
+        assert.strictEqual((await res.json()).analysis.cloudVariableCount, 1);
       });
 
       await test('POST /api/inspect rejects an empty body', async () => {
@@ -706,6 +875,47 @@ const main = async () => {
         assert.ok(served.equals(expected));
         assert.strictEqual(JSON.parse(decodeURIComponent(res.headers.get('x-pack-stats'))).mode, 'tw');
         assert.match(decodeURIComponent(res.headers.get('x-pack-filename')), /\.tw\.html$/);
+      });
+
+      await test('POST /api/pack carries the whole option set into the page', async () => {
+        // One query string exercising every family the UI can now send:
+        // a pass-through player option, a derived one (maxClones), a cloud
+        // provider, a resize mode, a control button and raw CSS.
+        const options = {
+          mode: 'fast',
+          inputPath: 'demo.sb3',
+          title: 'Opt',
+          cloudMode: 'local',
+          projectId: 'bl-probe',
+          resizeMode: 'dynamic-resize',
+          cursor: 'none',
+          controlGreenFlag: true,
+          maxTextureDimension: 4096,
+          packagedRuntime: false,
+          maxClones: Infinity,
+          customCSS: '.bl{q:1}'
+        };
+
+        const res = await post('/api/pack', sb3, '?filename=demo.sb3&title=Opt' +
+          '&cloudMode=local&projectId=bl-probe&resizeMode=dynamic-resize&cursor=none' +
+          '&controlGreenFlag=1&maxTextureDimension=4096&packagedRuntime=0&maxClones=Infinity' +
+          '&customCSS=' + encodeURIComponent('.bl{q:1}'));
+        assert.strictEqual(res.status, 200);
+
+        const served = Buffer.from(await res.arrayBuffer());
+        const html = served.toString('utf8');
+        assert.match(html, /new Scaffolding\.Cloud\.LocalStorageProvider\("cloudvariables:bl-probe"\)/);
+        assert.match(html, /scaffolding\.resizeMode = "dynamic-resize"/);
+        assert.match(html, /\.sc-canvas \{ cursor: none; \}/);
+        assert.match(html, /maxClones: Infinity/);
+        assert.match(html, /usePackagedRuntime = false/);
+        assert.match(html, /setMaxTextureDimension\(4096\)/);
+        assert.match(html, /greenFlagButton/);
+        assert.match(html, /\.bl\{q:1\}/);
+
+        // Still the same pipeline: the query string must not be a second,
+        // slightly different way of building the page.
+        assert.ok(served.equals(packToHtml(sb3, options).html));
       });
 
       await test('POST /api/pack rejects an empty body instead of packing nothing', async () => {

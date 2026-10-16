@@ -179,7 +179,14 @@ node src/pack.js <project.sb3> [options]
       --deflate-index     顺带尝试压缩容器索引
       --instrument        注入跑分钩子，把计时 POST 到 /__result
       --json              以 JSON 输出统计
+
+      --options <spec>    整套选项：JSON 字面量，或 @文件.json
 ```
+
+`--options` 收的就是网页版「导出」写出的那份文件（`{app, version, options}` 外壳会自动剥掉），
+所以「在界面上调好 → 导出 → 命令行复现」是同一条路。手写的 `--title` / `--autoplay` /
+`--turbo` / `--framerate` / `--username` / `--preload` 仍然可用，并且**覆盖**选项文件里的同名项。
+`pack-exe.js` 收同一套。
 
 `--mode=tw` 产出的就是 TurboWarp 的原始策略（内嵌 sb3 + JSZip），保留它是为了做 A/B 对照。
 
@@ -192,37 +199,72 @@ node ui/server.js --port 9000 --open
 
 界面照着 **TurboWarp 网页打包器**（`packager.turbowarp.org`，其 UI 在
 [`src/p4/`](https://github.com/TurboWarp/packager/tree/master/src/p4)，Svelte）重建：
-一样的 625px 居中卡片列、卡片顶部 6px 强调色条、同样的按钮三色（主色 / 绿 `#0FBD8C` / 橙 `#FF8C1A`）、
-同样的分组（选择作品 → 运行时选项 → 播放器选项 → 高级选项 → 环境 → 导出导入 → 打包预览 → 下载），
+一样的 625px 居中卡片列、卡片顶部 6px 强调色条、同样的按钮三色（主色 / 绿 `#0FBD8C` / 橙 `#FF8C1A`），
 以及跟随系统的浅色/深色主题。选项**载入作品之前不显示**，这也是上游的行为。
+
+分组也照上游的 `PackagerOptions.svelte` 排：
+
+| 卡片 | 对应上游 | 里面的项 |
+|---|---|---|
+| 运行选项 | `options.runtimeOptions` | 加速模式、帧率、补帧、高清画笔、无限克隆、角色可穿过边缘、移除其他限制、用户名、停止时关闭窗口；舞台（自定义舞台大小、三种缩放模式） |
+| 展示选项 | `options.playerOptions` | 页面标题；加载页（进度条、提示文本）；控制栏（自动运行、绿旗/停止/暂停/全屏按钮）；颜色（背景/前景/主题色）；监视器（允许编辑列表、变量颜色、列表颜色） |
+| 输入 | `options.interaction` | 正常指针 / 无指针 |
+| 云变量 | `options.cloudVariables` | 忽略 / 存储在本地浏览器，以及「作品 ID」 |
+| 高级选项 | `options.advancedOptions` | 使用编译、循环计时器、自定义 CSS、自定义 JS、加载后移除原始素材数据、增大最大矢量图像分辨率 |
+| 本打包器专用 | —— | 素材容器 `fast`/`tw`、PNG 无损重压、不压缩容器条目、预热素材 |
+| 运行环境 | `options.environment` | 单文件 HTML / Windows 应用程序（EXE）；选 EXE 时展开应用设置 |
+
+页面上只有**一张**输出卡：状态行。载入作品时它是作品摘要，打包完成后它就是**下载链接**
+（`#downloads` 挂在 `#statusCard` 里），细节报表收在折叠的 `<details>` 里。
+上游那张常驻的统计卡和「作品」卡都被去掉了——同一个位置重复三遍信息，读起来反而更慢。
+
+`fencing` / `miscLimits` / `maxClones` / `maxTextureDimension` 在协议里是取值，在界面上是开关
+（「角色可穿过边缘」是 `fencing: false`，「无限克隆」是 `maxClones: Infinity`，
+「增大…分辨率」是 `maxTextureDimension: 2048 → 4096`）。换算只在 `readOptions()` 里做一次，
+所以「导出」写出的 JSON 直接就是 CLI 认的格式，`导入` 只做反向那一次换算。
 
 配色只用**一个**品牌 token（`--accent: #75c1c4`，Bilup 的品牌青）：卡片顶条、拖放高亮、
 原生勾选/单选框、主按钮都取它，链接用它加深/提亮后的同色相（浅色 `#1f7a7e`，深色 `#7fd0d3`）。
 它是个**浅色**相，白字压在上面只有 2.1:1，所以主按钮的文字改用同色相的暗墨
 （`--accent-ink: #0d2e2f`，6.8:1）；绿/橙那两个语义按钮继续用白字，因为它们本来够深。
+上游给每个分区一个不同的强调色，这里没有跟：那会把好不容易换成品牌色的界面又花回去，
+分区靠标题就能区分。
 
-和 TW 的两处刻意不同：
+和 TW 刻意不同的地方：
 
 | | TurboWarp | 这里 |
 |---|---|---|
 | 导入方式 | Scratch 作品 ID / 文件 / 其他 URL | 只有文件 |
-| 界面风格 | 强调色 `#ff4c4c` | Bilup 品牌色 `#75c1c4`（其余几何与配色一致） |
+| 云变量 | 连 `clouddata.turbowarp.org` 实时同步 / 本地存储 / 逐变量自定义 / 忽略 | 只有本地存储 / 忽略 |
+| 目标 | html / zip / electron / nwjs / wkwebview | 单文件 HTML / Windows EXE |
+| 界面风格 | 每个分区一个强调色，主色 `#ff4c4c` | 单一品牌色 `#75c1c4`（几何与分组一致） |
+| 输出 | 结果卡 + 下载区 + 统计 | 只有状态行，下载链接就在上面 |
 
-只有文件导入，是因为 ID / URL 两种方式都要联网，而这个打包器的定位是**纯本地**：
-打包在 Node 进程里做（`loadSb3` 需要 `node:zlib`），浏览器只负责拖拽、显示统计和下载，
-作品不会离开这台机器。
+只有文件导入，是因为 ID / URL 两种方式都要联网；云变量只留本地存储，是因为 WebSocket 那条路
+同样要联网。这个打包器的定位是**纯本地**：打包在 Node 进程里做（`loadSb3` 需要 `node:zlib`），
+浏览器只负责拖拽、显示统计和下载，作品不会离开这台机器。
 
-对 TW 界面里那些我们没有实现的能力（控件/颜色/监视器/云变量/自定义扩展/自定义 CSS·JS…），
-**一个都没摆在界面上**——摆一个点不动的选项比不摆更糟。
+上游还有四类选项这里**一个都没摆**，因为它们在这台机器上不可能真的生效：
+
+| 缺的能力 | 为什么 |
+|---|---|
+| 指针锁定 / 手柄 | 靠 addons 里的额外区块，`scaffolding-min.js` 里没有 |
+| 自定义扩展（含「烘焙进产物」） | 要么联网下载，要么把扩展源码整段嵌进去，与「不联网」冲突 |
+| 自定义指针图案 / 加载页图片 | 需要一条图片上传通道，这套 API 没有 |
+| zip / electron / nwjs / WKWebView 目标 | 只实现了 HTML 与 Windows EXE 两条产线 |
+
+摆一个点不动、或者点了不生效的选项比不摆更糟，所以宁缺勿滥。
 
 仍然是零依赖——只用了 `node:http`。三个前端（`src/pack.js`、`src/pack-exe.js`、
 `ui/server.js`）都调 `src/lib/pipeline.js`，所以「同一个选项」在三处的含义必然一致；
-测试里直接断言**网页版返回的 HTML 与 CLI 逐字节相同**。
+测试里直接断言**网页版返回的 HTML 与 CLI 逐字节相同**。选项名单也只写一次
+（`src/lib/pipeline.js` 的 `RENDER_OPTION_KEYS`）——不在名单里的键根本到不了渲染器，
+所以界面上不可能出现一个「发得出去、没人接」的开关。
 
 界面上独有的东西（也就是这个打包器自己的功能）：素材容器 `fast`/`tw` 对照、
 PNG 无损重压、预热素材、不压缩容器条目，以及 Windows EXE 目标（应用设置：窗口尺寸、
 F12 开发者工具、顺带编译）。另外「载入作品」那一步会先解析归档并报出里面有什么
-（角色/素材/扩展/运行时/是否需要 full 版），`/api/inspect` 只解析、不做重压——
+（角色/素材/扩展/云变量数量/运行时/是否需要 full 版），`/api/inspect` 只解析、不做重压——
 那是打包时才该付的代价。
 
 安全姿态（这个进程收上传、写 `exe/build/`，所以）：
@@ -257,7 +299,7 @@ https://packager.turbowarp.org/scaffolding/scaffolding-full.js   # 用到 music 
 ## 5. 测试与验证
 
 ```bash
-node test/run.js          # 39 项，全部在 Node 里跑（含网页版的 HTTP 端到端）
+node test/run.js          # 45 项，全部在 Node 里跑（含网页版的 HTTP 端到端）
 ```
 
 覆盖内容包括：
@@ -281,10 +323,10 @@ node test/run.js          # 39 项，全部在 Node 里跑（含网页版的 HTT
 > 抓 bug 的，静默跳过等于没测。
 - **网页版**：起一个真实 HTTP 服务（临时端口、临时根目录）后断言
   `POST /api/pack` 返回的字节与进程内管线**完全相同**、`mode=tw` 生效、
-  播放器选项（`turbo`/`autoplay`/`framerate`/`username`）与 PNG 开关确实传到了渲染层、
-  空 body 返回 400、`/api/inspect` 只解析（不重压、不渲染）、`pack-exe` 只往注入的根目录写、
-  窗口尺寸会被夹到合法区间、`exe/build/` 里**上一轮遗留的二进制不会出现在产物列表里**、
-  `/api/artifact` 拒绝白名单外的名字与目录穿越、伪造 `Host` 头被 403 拦掉
+  播放器选项（`turbo`/`autoplay`/`framerate`/`username`/舞台缩放/监视器颜色/云变量…）确实
+  传到了渲染层、空 body 返回 400、`/api/inspect` 只解析（不重压、不渲染）、`pack-exe` 只往
+  注入的根目录写、窗口尺寸会被夹到合法区间、`exe/build/` 里**上一轮遗留的二进制不会出现在
+  产物列表里**、`/api/artifact` 拒绝白名单外的名字与目录穿越、伪造 `Host` 头被 403 拦掉
 
 其中「播放器选项确实传到了渲染层」这条带一个**反向断言**：夹具必须能被 PNG 重压压小，
 否则翻转 `optimizePng` 观测不到任何差异，那条断言就会变成永远成立的噪音。
@@ -507,7 +549,7 @@ ui/             本地网页版（node:http + 一个静态页面，零依赖）
 exe/            WebView2 宿主（C++，MSVC 构建）+ build.cmd
 bench/          合成工程生成器（--art 造 canvas 风格位图）+ 无头跑分 + 体积拆解
                   ui-check.js 无头浏览器里跑通整个网页版流程
-test/           验证套件（39 项，含 ui 的 HTTP 端到端）
+test/           验证套件（45 项，含 ui 的 HTTP 端到端）
 vendor/         运行时脚本（需自行下载）
 out/            产物（不进版本库）
 ```

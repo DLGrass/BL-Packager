@@ -430,6 +430,34 @@ PNG 8.60 MB（deflate 只省 0.0%）、WAV 5.05 MB（省 7.5%）、SVG 2.46 MB�
 
 `bench/run.js` 的原始输出在 `out/bench/results.json`（含每次的数值）。
 
+### CI（GitHub Actions）
+
+`.github/workflows/ci.yml`，在 push 到 `main` 与所有 PR 上跑两个作业：
+
+| 作业 | 平台 | 做什么 |
+|---|---|---|
+| `test` | ubuntu + windows | `pnpm test` |
+| `ui-check` | windows | 在真实浏览器里驱动网页版，把**页面下载到的 blob** 与 CLI 的字节比对 |
+
+两个作业都得先把**仓库故意没包含**的东西补上——不补不是「跳过」，是直接失败：
+
+- `../_ref/turbowarp-packager`：上游的真实 `.sb3` 夹具，`git clone --depth 1` 到检出目录
+  **旁边**（`test/run.js` 按 `<repo>/../_ref/...` 找它）；
+- `vendor/scaffolding-min.js`：产物 HTML 要内嵌的运行时，从 `packager.turbowarp.org` 下载。
+  实测该地址返回 **1,813,190 字节**，与本机 `vendor/` 里那份**同尺寸**，
+  所以 CI 跑的和本机跑的是同一份运行时。
+
+`ui-check` 只有 Windows 一档：`bench/ui-check.js` 按 Windows 的标准安装路径找 Edge/Chrome。
+
+CI **故意不做**两件事，因为在这里做只会得到假结论：
+
+- **不编译 exe**：要 MSVC + 下载 WebView2 SDK，费钱且慢，而 `exe/build.cmd` 的价值在于
+  本机那份 MSVC；测试覆盖的是它**之前**那一步（资源落地），那一步在 CI 里跑。
+- **不跑 `bench/run.js`**：它测的打开耗时，结论本身就是「几个变体落在噪声内」。
+  放进 CI 会得到精确到毫秒的假差异——那正是这一节反复在提醒的事。
+
+想在本机复现这两个作业，就是上面那几条命令，外加「夹具 + 运行时」这两个前置文件。
+
 ---
 
 ## 6. 打包成 .exe

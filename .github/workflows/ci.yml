@@ -1,0 +1,119 @@
+# CI runs the only two things here that can actually fail: the Node test suite,
+# and the web UI driven in a real browser.
+#
+# Two inputs are deliberately absent from the repository, and a fresh clone has
+# to supply them before anything can pass:
+#
+#   <repo>/../_ref/turbowarp-packager   the real .sb3 fixtures the round-trip
+#                                       tests run against. They are upstream's
+#                                       files, so they were not copied in here.
+#   vendor/scaffolding-min.js           the runtime the produced HTML embeds.
+#                                       It is a build artifact of TurboWarp's
+#                                       scaffolding and is not redistributed
+#                                       here; see README section 4.
+#
+# Neither is optional. test/run.js fails rather than skips when the fixtures are
+# missing -- on purpose, because a fixture that is silently skipped is a fixture
+# that is not testing anything. Same reasoning applies to the runtime bundle.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # The two legs are independent; one failing does not make the other's
+      # result uninteresting.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # git creates the intermediate _ref/ directory itself. The path matters:
+      # test/run.js resolves it as path.join(ROOT, '..', '_ref', ...), so it must
+      # sit *next to* the checkout, not inside it.
+      - name: Check out TurboWarp/packager for the test fixtures
+        shell: bash
+        run: >
+          git clone --depth 1 https://github.com/TurboWarp/packager.git
+          "$GITHUB_WORKSPACE/../_ref/turbowarp-packager"
+
+      - name: Fetch the runtime scripts that are not redistributed here
+        shell: bash
+        run: |
+          curl -fsSL -o vendor/scaffolding-min.js \
+            https://packager.turbowarp.org/scaffolding/scaffolding-min.js
+          ls -l vendor/scaffolding-min.js
+
+      # No `version:` -- the action reads packageManager from package.json, which
+      # is the whole point of pinning it there.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # There is nothing to download, so this is really a check that the
+      # committed pnpm-lock.yaml still matches package.json.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+  ui-check:
+    # Only Windows: bench/ui-check.js looks for Edge/Chrome in the standard
+    # Windows install locations, and it is the browser-side wiring (the drop
+    # handler, the option plumbing, the blob download) that it exists to cover.
+    name: web UI in a real browser (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the runtime scripts that are not redistributed here
+        shell: bash
+        run: |
+          curl -fsSL -o vendor/scaffolding-min.js \
+            https://packager.turbowarp.org/scaffolding/scaffolding-min.js
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # ui-check packs a project that already exists on disk; it does not make
+      # one. bench/make-project.js is deterministic (fixed seeds), so CI and a
+      # local run pack the same bytes.
+      - name: Generate the project the page will pack
+        run: pnpm make-project
+
+      # The assertion is that the blob the browser ends up holding is
+      # byte-identical to what the CLI writes for the same project.
+      - name: Pack through the page (single-file HTML)
+        run: pnpm run ui-check
+
+      - name: Pack through the page (Windows exe resources)
+        run: pnpm run ui-check --target exe

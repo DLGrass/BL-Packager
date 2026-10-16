@@ -17,6 +17,25 @@ node src/pack-exe.js project.sb3 --title "My Game"    # 生成资源，再由 ex
 node ui/server.js                                     # 网页版：http://127.0.0.1:8788
 ```
 
+包管理器是 **pnpm**（`packageManager: pnpm@10.33.0`，配合 corepack）。因为零依赖，
+它在这里只做两件事：**钉住工具链版本**和**提供统一的入口脚本**——上面那些命令换个写法就是：
+
+```bash
+pnpm install            # 没有依赖，只会生成 pnpm-lock.yaml
+pnpm test               # = node test/run.js
+pnpm pack:html project.sb3 -o out/project.html
+pnpm pack:exe project.sb3
+pnpm ui                 # 网页版
+pnpm bench / ui-check / make-project
+```
+
+⚠️ 脚本叫 `pack:html` 而不是 `pack`，是**故意的**：`pnpm pack` 是 pnpm 的内置命令
+（打 npm tarball），同名脚本会被它遮蔽——敲 `pnpm pack` 不会报错，而是**静默产出一个
+`bl-packager-0.1.0.tgz`**。这种错最难发现，所以宁可从名字上避开。
+
+`vendor/scaffolding-min.js` **不走包管理器**（它是上游产物，不随仓库分发），
+得手动放到 `vendor/` 下，见 4 节。
+
 网页版的界面照 [packager.turbowarp.org](https://packager.turbowarp.org/) 重建（卡片式布局、
 明暗双主题、同样的选项分组），选项按这个仓库实现了的能力给，见 4 节。
 
@@ -299,7 +318,7 @@ https://packager.turbowarp.org/scaffolding/scaffolding-full.js   # 用到 music 
 ## 5. 测试与验证
 
 ```bash
-node test/run.js          # 45 项，全部在 Node 里跑（含网页版的 HTTP 端到端）
+pnpm test                 # = node test/run.js，45 项全部在 Node 里跑（含网页版的 HTTP 端到端）
 ```
 
 覆盖内容包括：

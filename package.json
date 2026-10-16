@@ -5,12 +5,13 @@
   "description": "Zero-dependency sb3 -> single-file HTML packager, modeled on TurboWarp/packager, with a faster asset-loading path.",
   "type": "commonjs",
   "main": "src/lib/index.js",
+  "packageManager": "pnpm@10.33.0",
   "engines": {
     "node": ">=18"
   },
   "scripts": {
-    "pack": "node src/pack.js",
-    "pack-exe": "node src/pack-exe.js",
+    "pack:html": "node src/pack.js",
+    "pack:exe": "node src/pack-exe.js",
     "ui": "node ui/server.js",
     "make-project": "node bench/make-project.js",
     "bench": "node bench/run.js",

@@ -5,8 +5,13 @@
 并对**打开时的素材加载**与**体积**做了针对性优化与实测
 （结论见第 5、6 节，**包含一项没测出收益、和一项需要前置条件才成立的结果**）。
 
-零依赖：只用 Node 内置模块（`node:zlib` / `node:crypto` / `node:fs`），没有构建步骤。
+零依赖：只用 Node 内置模块（`node:zlib` / `node:crypto` / `node:fs`），打包器本身没有构建步骤。
 `.exe` 那一步用系统已有的 MSVC 编译，只用 Windows SDK 与 WebView2 SDK。
+
+同一条管线也能**整个搬进浏览器**跑（`node:zlib` / `node:crypto` / `fs` 都由仓库内自带的实现顶上），
+所以除了 CLI 和本地网页版，还有第三个交付形态：一个**纯前端的静态站点**，作品不经过任何服务器，
+打开 [dlgrass.github.io/BL-Packager](https://dlgrass.github.io/BL-Packager/) 拖进 sb3 就能得到 HTML。
+站点由 `pnpm build:site` 生成、由 CI 发到 GitHub Pages，见 4.1 节。
 
 ```bash
 node src/pack.js project.sb3 -o out/project.html
@@ -26,6 +31,7 @@ pnpm test               # = node test/run.js
 pnpm pack:html project.sb3 -o out/project.html
 pnpm pack:exe project.sb3
 pnpm ui                 # 网页版
+pnpm build:site         # 纯前端静态站点 → site/（可直接扔进任意静态托管）
 pnpm bench / ui-check / make-project
 ```
 
@@ -209,7 +215,7 @@ node src/pack.js <project.sb3> [options]
 
 `--mode=tw` 产出的就是 TurboWarp 的原始策略（内嵌 sb3 + JSZip），保留它是为了做 A/B 对照。
 
-### 网页版（`ui/`）
+### 4.1 网页版（`ui/`）
 
 ```bash
 node ui/server.js            # 默认 http://127.0.0.1:8788
@@ -260,8 +266,9 @@ node ui/server.js --port 9000 --open
 | 输出 | 结果卡 + 下载区 + 统计 | 只有状态行，下载链接就在上面 |
 
 只有文件导入，是因为 ID / URL 两种方式都要联网；云变量只留本地存储，是因为 WebSocket 那条路
-同样要联网。这个打包器的定位是**纯本地**：打包在 Node 进程里做（`loadSb3` 需要 `node:zlib`），
-浏览器只负责拖拽、显示统计和下载，作品不会离开这台机器。
+同样要联网。这个打包器的定位是**纯本地**：本地网页版的打包在 Node 进程里做，
+浏览器只负责拖拽、显示统计和下载；静态站点（4.2）连那一步也在浏览器里，
+任何形态下作品都不离开这台机器。
 
 上游还有四类选项这里**一个都没摆**，因为它们在这台机器上不可能真的生效：
 
@@ -300,9 +307,70 @@ F12 开发者工具、顺带编译）。另外「载入作品」那一步会先�
 `--view-assets`（那个性能回归开关）**故意没有暴露到界面上**：它是用来复现实验的，
 不是功能。
 
----
+### 4.2 纯前端站点（GitHub Pages）
 
-### 运行时脚本
+```bash
+pnpm build:site          # → site/{index.html, app.js, worker.js, local-api.js}
+node bench/ui-check.js --site
+```
+
+`site/` 里**没有任何服务端**：把四个文件拷到任意静态托管上，拖进一个 sb3，HTML 就在浏览器里生成。
+[dlgrass.github.io/BL-Packager](https://dlgrass.github.io/BL-Packager/) 就是这份产物，
+由 CI 在 `main` 通过全部作业后发布（见 §5）。
+
+**难点不在页面，在于管线原本只认 Node。** `src/lib/` 用了四样浏览器没有的东西，所以每一样都在
+仓库内重写了一份，而不是给站点留一个「需要服务器」的洞：
+
+| 依赖 | 用在哪 | 站点里的替代 |
+|---|---|---|
+| `zlib.deflateRawSync` / `deflateSync` | 容器条目、整个产物 HTML 的压缩 | `src/lib/deflate.js`：同步的 DEFLATE 编码器（定长 Huffman + 贪心 LZ77 + lazy matching），带 RFC 1950 zlib 包装与 Adler-32 |
+| `crypto.createHash('md5')` | 素材名、`md5ext` | `src/lib/md5.js`（RFC 1321） |
+| `Buffer` | 整个 `src/lib/` 的读写习惯 | `src/lib/bytes.js`：`Uint8Array` 子类，补上 `read/write UInt*LE/BE`、`toString('latin1'\|'hex'\|'base64'\|'utf8')`、`from/concat/equals/copy/slice` |
+| `fs` / `path` | 读 `vendor/`、拼路径 | 构建期把运行时文件塞进一张 VFS（按 basename 索引），`readFileSync` 直接查表；写文件在站点里直接抛错 |
+
+`src/build-site.js` 是个**零依赖的迷你 bundler**：从 `src/lib/pipeline.js` 出发遍历 `require()` 图，
+把每个模块包成一个 factory，再注入上面那几个 `node:*` 的垫片，最后把 `vendor/scaffolding-min.js`、
+`src/runtime/*.js` 一并以字符串塞进 VFS。产物就是 `site/` 那四个文件（合计约 **2.0 MB**，
+其中 `app.js` 1.94 MB —— 大头是 1.7 MB 的 scaffolding 运行时）。
+
+页面**和本地网页版是同一份** `ui/index.html`。唯一的接线是三行：
+
+- `ui/index.html` 里一处 `apiFetch = window.__BL_LOCAL__ ? __BL_LOCAL__.request : fetch`，
+  于是健康检查、`/api/inspect`、`/api/pack` 三个调用在两种形态下走同一个函数；
+- `site/local-api.js` 提供 `window.__BL_LOCAL__`，用 `Worker('worker.js')` 回答那三个路由，
+  返回的对象形状与 `fetch` 一致（`ok/status/headers/json/blob`）；
+- 打包在 **Worker** 里跑（`worker.js` 用 `importScripts('app.js')` 加载同一个 bundle）——
+  真实作品要 CPU 烧好几秒，把主线程冻住、让「打包中…」两秒不动，比慢一点更糟。
+
+它和本地网页版的差异，都写在明面上：
+
+| | `ui/server.js` | 静态站点 |
+|---|---|---|
+| EXE 目标 | 可以（写 `exe/build/` 再交给 MSVC） | **隐藏**，`/api/pack-exe` 回 501 |
+| 打包位置 | Node 主进程 | 浏览器 Worker |
+| PNG 重压默认 | 开 | **关**（见下） |
+| 产物字节 | 基准 | 约 **+0.5%**（见下） |
+
+**PNG 重压在浏览器里默认关掉**，理由是实测：它要在浏览器里花 7.6 s，而且**产出与浏览器自己编码的
+PNG 字节相同**——这套无损重压的价值在于「比 Chromium 的 canvas 编码器更好」，
+而站点里的 deflate 是我们自己那份，赢不了系统 zlib。界面上的开关还在，只是默认不勾。
+
+**产物比 CLI 大 0.5%**（合成工程：19,714,805 vs 19,617,817 字节）。原因只有一个：编码器用**定长
+Huffman**，省掉了动态 Huffman 表那部分开销。试过加 lazy matching，压缩率没动、速度更慢，
+所以没继续；真实的 sb3 里大头是已经压过的 PNG/MP3，这一项影响不到它们。要抹平这 0.5% 得写
+动态 Huffman 编码器，收益不抵复杂度，**明确不做**。
+
+正确性不靠「看起来能跑」保证：`test/run.js` 里有一节 `[browser codecs]`，
+把 `deflate` 的输出交给真实的 `zlib.inflateSync` 解、把 `md5` 与 `node:crypto` 对拍、
+把 Buffer 垫片与真 Buffer 的每一次读写对拍，共 5 项。
+
+**部署**：CI 里 `deploy` 作业在 `commits`/`test`/`ui-check` 全过后跑（只对 push 到 `main`），
+用 `actions/configure-pages` + `upload-pages-artifact`（`path: site`）+ `deploy-pages`。
+仓库设置里**必须把 Pages 的源改成 "GitHub Actions"**（Settings → Pages → Source），
+这是唯一需要人工做一次的步骤；没改之前该作业会失败，报的是 `configure-pages` 自己那句提示。
+Pages 站点是**公开**的，所以别把私有作品传上去打包——它真的会在人家的服务器上跑一遍。
+
+### 4.3 运行时脚本
 
 `vendor/scaffolding-min.js` 需要自己放到 `vendor/` 下（不随仓库分发）：
 
@@ -318,7 +386,7 @@ https://packager.turbowarp.org/scaffolding/scaffolding-full.js   # 用到 music 
 ## 5. 测试与验证
 
 ```bash
-pnpm test                 # = node test/run.js，45 项全部在 Node 里跑（含网页版的 HTTP 端到端）
+pnpm test                 # = node test/run.js，55 项全部在 Node 里跑（含网页版的 HTTP 端到端）
 ```
 
 覆盖内容包括：
@@ -335,6 +403,9 @@ pnpm test                 # = node test/run.js，45 项全部在 Node 里跑（�
   原生解压路径、纯 JS 兜底路径、预热复用、未知素材返回 `null` 而非抛错
 - 对上游 checkout 里 `test/packager/projects/*.sb3` 的**每个真实 fixture** 做往返验证
   （这一步抓出了 `subdirectory.sb3`：project.json 与素材整体位于一层子目录下）
+- **浏览器侧编解码器**（`[browser codecs]`，5 项）：自己写的 deflate 编码器产出的流交给
+  真实的 `zlib.inflateSync` 解、zlib 包装层连 Adler-32 一起校验、`md5` 对 `node:crypto`、
+  Buffer 垫片对真 Buffer 的每次读写、以及编码器索引的那几张 RFC 1951 常量表长度
 
 > ⚠️ 最后一项需要一份 [TurboWarp/packager](https://github.com/TurboWarp/packager) 的
 > 检出放在**仓库外面**的 `<本仓库>/../_ref/turbowarp-packager`（那些 `.sb3` 夹具是上游的，
@@ -357,6 +428,7 @@ pnpm test                 # = node test/run.js，45 项全部在 Node 里跑（�
 
 ```bash
 node bench/ui-check.js --target exe --shot out/ui.png
+node bench/ui-check.js --site --shot out/site.png     # 纯前端站点，没有服务端
 ```
 
 它在进程内起服务、用**无头 Edge + CDP**打开页面，通过 `DOM.setFileInputFiles`
@@ -366,6 +438,11 @@ node bench/ui-check.js --target exe --shot out/ui.png
 校验 `app.html.gz`），`--shot` 会先撑高视口再截一张**全页**截图。
 `--theme light|dark` 先写 localStorage 再重载，并断言页面 `theme` 属性真的落在请求的
 那一个上 —— 主题是在首帧之前解析的，只靠事后改属性验证不了这条启动路径。
+
+`--site` 换成一个**只会发静态文件**的服务（没有 `/api/*`，和 Pages 的行为一致），要求先跑过
+`pnpm build:site`，然后断言三件事：页面确实走了 `window.__BL_LOCAL__` 那条路、
+版本行写着「浏览器内打包」、产物落在 CLI 的 **0.9–1.25 倍**带宽内（不再要求逐字节相等，
+因为 bundle 自带 deflate，见 4.2）。`--site --target exe` 直接报错——站点上那个目标是被藏起来的。
 
 ### 浏览器端到端（打包产物本身）
 
@@ -433,25 +510,30 @@ PNG 8.60 MB（deflate 只省 0.0%）、WAV 5.05 MB（省 7.5%）、SVG 2.46 MB�
 ### CI 与 Release（GitHub Actions）
 
 工作流的骨架是从 **Bilup/packager** 的 `.github/workflows/` 搬过来的（pnpm → Node → install → test、
-`cache: pnpm`、`concurrency` 取消、只读 `permissions`），只留这个仓库真实存在的东西。
-那边有这个仓库没有对手的部分就没搬，理由写在 `ci.yml` 开头：
+`cache: pnpm`、`concurrency` 取消、只读 `permissions`、以及一个在测试之后跑的 `deploy`），
+只留这个仓库真实存在的东西。搬过来但**换了内容**的两条，理由写在 `ci.yml` 开头：
 
-| 那边 | 为什么不在这里 |
+| 那边 | 这里 |
 |---|---|
-| `build` / `build-standalone-prod` | 这里没有构建步骤：打包器就是 `node` 直接跑的 CommonJS |
-| `deploy` → `web` 分支 | 那是推一个预先构建好的单页。这里的网页版是**服务**（`ui/server.js` 要靠 `node:zlib` 才压得动），没有单文件可发 |
-| `package.yml`（每周刷 lockfile） | 零依赖，锁文件是个存根，每周跑只会得到一个空提交 |
+| `build` / `build-standalone-prod` | 打包器本身仍然没有构建步骤（`node` 直接跑的 CommonJS），但**站点**要构建：`pnpm build:site` 产出 `site/`，也就是部署物 |
+| `deploy` → `web` 分支 | 改成 **GitHub Pages actions**（`configure-pages` + `upload-pages-artifact` + `deploy-pages`）。那边是 force-push 一个预构建分支，这里不需要分支、不需要强推，发布地址也自带 |
+| `package.yml`（每周刷 lockfile） | 没搬：零依赖，锁文件是个存根，每周跑只会得到一个空提交 |
 
-留下来的三件：
+四个作业：
 
 - **`.github/workflows/ci.yml`** — push 到 `main` 与所有 PR：
 
 | 作业 | 平台 | 做什么 |
 |---|---|---|
 | `commits` | ubuntu | 校验本次 push 引入的提交信息（见下一节） |
-| `test` | ubuntu + windows | `pnpm test`（50 项），外加一次 CLI 冒烟打包，产物传 artifact |
-| `ui-check` | windows | 在真实浏览器里驱动网页版，把**页面下载到的 blob** 与 CLI 的字节比对 |
+| `test` | ubuntu + windows | `pnpm test`（55 项），外加一次 CLI 冒烟打包，产物传 artifact |
+| `ui-check` | windows | 在真实浏览器里驱动网页版，把**页面下载到的 blob** 与 CLI 的字节比对；再 `build:site` 后用 `--site` 跑一遍**没有服务端**的那条路 |
+| `deploy` | ubuntu | 仅在 push 到 `main` 且**上面三件全过**时发布 `site/` 到 Pages（`needs: [commits, test, ui-check]`） |
 
+`deploy` 用 `concurrency: group: pages, cancel-in-progress: false`：已经在发布的那次应该跑完，
+中途取消正是「站点只更新一半」的由来。它只多要两个权限（`pages: write`、`id-token: write`），
+其余作业仍是只读。**第一次启用需要在仓库设置里把 Pages 的源选成 "GitHub Actions"**，
+这一步 CI 做不到（要仓库管理权限），不做的话该作业会带着 `configure-pages` 的提示失败。
 - **`.github/workflows/release.yml`** — 推 `v*` 标签触发：先跑测试，并校验「标签名 == `package.json`
   的 version」（`v0.2.0` 配 `0.1.0` 的包会被拦住）；再用 `git archive` 打源码包——它只取标签那棵树的文件，
   所以自动排除 `node_modules`、`out/`、`vendor/`，并服从 `.gitattributes` 的 `export-ignore`；
@@ -461,7 +543,7 @@ PNG 8.60 MB（deflate 只省 0.0%）、WAV 5.05 MB（省 7.5%）、SVG 2.46 MB�
 - **`.github/dependabot.yml`** — 上游是对 npm 每日扫；这里没有依赖，所以主要盯 **actions 的版本**（每周），
   npm 那一档留作兜底（每月）。两档的提交前缀都是 Conventional type，机器人 PR 也过同一道卡。
 
-`test` / `ui-check` / `verify` 都得先把**仓库故意没包含**的东西补上——不补不是「跳过」，是直接失败：
+`test` / `ui-check` / `deploy` 都得先把**仓库故意没包含**的东西补上——不补不是「跳过」，是直接失败：
 
 - `../_ref/turbowarp-packager`：上游的真实 `.sb3` 夹具，`git clone --depth 1` 到检出目录
   **旁边**（`test/run.js` 按 `<repo>/../_ref/...` 找它）；
@@ -624,15 +706,26 @@ Construct 的作者在下面报了同样的问题，他用的是 `deflate`）。
   `extensionURLs` 里的地址（通常是 `extensions.turbowarp.org`）。**离线打开会失败**，
   这是当前最常见的「打包后打不开」来源。
 - `vendor/` 下的运行时脚本受各自许可证约束，本仓库不分发。
+- 静态站点（4.2）**只能产出 HTML**：exe 要 MSVC 与写盘，浏览器里做不到，所以那个目标在站点上
+  被藏起来、接口回 501。站点的产物比 CLI 大约 **0.5%**（自带 deflate 用的是定长 Huffman），
+  并且**不默认重压 PNG**。Pages 是公开托管，别把不想公开的作品传上去打包。
 
 ## 8. 目录
 
 ```
 src/lib/        打包器侧（Node）：zip 读写、crc32、base85、PNG 无损重压、
                   sb3 装载与压缩、容器构建、HTML 生成
+                  deflate.js  bytes.js  md5.js
+                  ↑ 浏览器侧的替代实现：同步 DEFLATE 编码器、Buffer 垫片、纯 JS MD5。
+                    只在站点构建里替换掉 node:zlib / Buffer / node:crypto，Node 侧不用它们
 src/lib/pipeline.js
                 三个前端共用的管线：prepareProject / inspectProject /
                   renderProjectHtml / packToHtml / writeExeResources / buildExe
+src/site/       静态站点专用的两片胶水：
+                  client.js     browser 版 pack/inspect（与 ui/server.js 的映射一致）
+                  local-api.js  用 Worker 回答 /api/*，使同一份页面也能在静态托管上跑
+src/build-site.js
+                零依赖迷你 bundler：遍历 require 图 + 注入 node:* 垫片 + VFS → site/
 src/runtime/    会内联进产物、同时能在 Node 里被测的运行时：
                   inflate-raw.js      纯 JS DEFLATE 解码（浏览器兜底）
                   container-reader.js BLPK 读取
@@ -641,11 +734,13 @@ src/pack.js     CLI（-> 单文件 HTML）
 src/pack-exe.js CLI（-> 单文件 .exe；复用同一条 HTML 管线，两者不会走偏）
 ui/             本地网页版（node:http + 一个静态页面，零依赖）
                   index.html  仿 TurboWarp 打包器的界面（卡片式、明暗双主题）
+                              —— 站点也用这一份，靠 window.__BL_LOCAL__ 分流
                   server.js   /api/{health,inspect,pack,pack-exe,artifact}
+site/           构建产物（不进版本库）：index.html / app.js / worker.js / local-api.js
 exe/            WebView2 宿主（C++，MSVC 构建）+ build.cmd
 bench/          合成工程生成器（--art 造 canvas 风格位图）+ 无头跑分 + 体积拆解
-                  ui-check.js 无头浏览器里跑通整个网页版流程
-test/           验证套件（50 项，含 ui 的 HTTP 端到端与提交规范）
+                  ui-check.js 无头浏览器里跑通整个网页版流程（--site 跑静态站点）
+test/           验证套件（55 项，含 ui 的 HTTP 端到端、浏览器编解码器与提交规范）
 .githooks/      commit-msg 钩子 + 提交规范校验器（install.js 由 prepare 自动跑）
 .github/        CI / Release / dependabot
 vendor/         运行时脚本（需自行下载）

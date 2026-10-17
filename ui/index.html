@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BL Packager - 把 Scratch 作品打包成 HTML 和 EXE</title>
-<meta name="description" content="把 Scratch 作品打包成单文件 HTML 或 Windows 可执行文件。零依赖，全程在本机运行。">
+<title>Bilup Packager - 把 Scratch 作品打包成 HTML 和 EXE</title>
+<meta name="description" content="Bilup Packager：把 Scratch 作品打包成单文件 HTML 或 Windows 可执行文件。零依赖，作品不会离开这台电脑。">
 <meta name="theme-color" content="#75c1c4">
 <style>
   /* Geometry follows TurboWarp/packager's src/p4 UI: a centred column of 625px
@@ -91,6 +91,20 @@
   }
   .card.accent { border-top: 6px solid var(--accent); }
   .card.caption { font-style: italic; color: var(--fg); }
+
+  /* masthead -------------------------------------------------------------- */
+  /* The brand mark sits next to the product name, and only there: the other
+     cards keep upstream's plain headings. It is drawn with 4.9-unit strokes,
+     so it needs real pixels — below ~36px the left-hand stems merge. */
+  .hero-head { display: flex; align-items: center; gap: 12px; }
+  .hero-mark { flex: none; width: 46px; height: 43.3px; color: var(--link); }
+  .hero-head > div { min-width: 0; }
+  .hero-head h1 { margin: 0 0 2px; }
+  .hero-head .version { margin: 0; }
+  .lede { margin: 14px 0 12px; }
+  .facts { margin: 12px 0; padding-left: 1.15em; }
+  .facts li { margin: 5px 0; }
+  .facts li::marker { color: var(--accent); }
 
   /* controls ------------------------------------------------------------- */
   input[type="text"], input[type="number"], textarea { padding: 2px; }
@@ -238,10 +252,25 @@
 <main id="main">
 
   <section class="card accent">
-    <h1>BL Packager</h1>
-    <p class="version" id="versionLine">本地打包器</p>
-    <p>把 Scratch 3 作品打包成<strong>单文件 HTML</strong>，或带 WebView2 宿主的 <strong>Windows 可执行文件</strong>。</p>
-    <p>打包全程在 <code>127.0.0.1</code> 上的本进程里完成，作品不会离开这台电脑，也不需要任何联网功能。</p>
+    <div class="hero-head">
+      <!-- Bilup's mark, cropped out of the official lockup (bilup-logo.svg in
+           scratch-gui). currentColor, so it follows the theme; the wordmark is
+           left out on purpose — the heading next to it already spells the name,
+           and two copies of "Bilup" side by side reads like a mistake. -->
+      <svg class="hero-mark" viewBox="154.59911 154.64907 53.9 50.70186" aria-hidden="true">
+        <path fill="currentColor" d="M166.84911,154.64907h17.15l-4.9,4.9h-9.8l-9.8,9.8v19.6l-4.9,-4.9v-17.15l12.25,-12.25M154.59911,188.94907v14.7h4.9v-9.8l-4.9,-4.9M188.89911,154.64907h14.7l-14.7,14.7h-14.7l-4.9,4.9v19.6l-4.9,4.9v-26.95l7.35,-7.35h14.7l4.9,-4.9h-7.35l4.9,-4.9M164.39911,203.64907l4.9,-4.9h22.05l7.35,-7.35v-7.35h-9.8l4.9,-4.9h9.8v14.7l-9.8,9.8h-29.4M203.59911,159.54907v4.9l-19.6,19.6h-4.9z"/>
+      </svg>
+      <div>
+        <h1>Bilup Packager</h1>
+        <p class="version" id="versionLine">本地打包器</p>
+      </div>
+    </div>
+    <p class="lede">把 Scratch 3 作品打包成<strong>单文件 HTML</strong>，或带 WebView2 宿主的 <strong>Windows 可执行文件</strong>——两种产物用的是同一条打包管线。</p>
+    <ul class="facts">
+      <li><strong>零依赖</strong>：只用 Node 内置模块，不需要安装任何第三方包。</li>
+      <li><strong>不上传</strong>：打包本身不需要联网，作品不会离开这台电脑。</li>
+      <li><strong>同一条管线</strong>：两个 CLI、本地网页版和在线版都走 <code>src/lib/pipeline.js</code>，改一处三处同步。</li>
+    </ul>
     <p class="disclaimer">本项目与 Scratch、Scratch 团队、Scratch 基金会无关。</p>
   </section>
 

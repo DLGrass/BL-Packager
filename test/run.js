@@ -770,7 +770,7 @@ const main = async () => {
         const res = await fetch(`${base}/`);
         assert.strictEqual(res.status, 200);
         assert.match(res.headers.get('content-type'), /text\/html/);
-        assert.match(await res.text(), /BL Packager/);
+        assert.match(await res.text(), /Bilup Packager/);
       });
 
       await test('GET /api/health reports the runtime and the toolchain', async () => {

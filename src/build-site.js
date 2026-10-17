@@ -1,6 +1,7 @@
 'use strict';
 
-// Builds the static site in site/: index.html + app.js + local-api.js + worker.js.
+// Builds the static site in site/: index.html + app.js + local-api.js +
+// worker.js + favicon.svg.
 //
 // There is no bundler dependency here on purpose -- the rest of this repository
 // has none either, and what is needed is small: walk the require() graph of
@@ -289,6 +290,9 @@ self.onmessage = function (event) {
 `, 'utf8');
 
   fs.copyFileSync(path.join(__dirname, 'site', 'local-api.js'), path.join(OUT, 'local-api.js'));
+  // The tab icon: ui/index.html links it relatively, so it has to travel with
+  // the page or the deployed site asks for a file that is not there.
+  fs.copyFileSync(path.join(ROOT, 'ui', 'favicon.svg'), path.join(OUT, 'favicon.svg'));
 
   const page = fs.readFileSync(path.join(ROOT, 'ui', 'index.html'), 'utf8');
   if (!page.includes('<!-- BL:SITE -->')) {
@@ -308,7 +312,7 @@ self.onmessage = function (event) {
 
 const summary = build();
 console.log(`site/      app.js  ${(fs.statSync(path.join(OUT, 'app.js')).size / 1024).toFixed(0)} KB`);
-console.log(`           worker.js, local-api.js, index.html`);
+console.log(`           worker.js, local-api.js, favicon.svg, index.html`);
 console.log(`modules    ${summary.modules} (${summary.builtins.join(', ')})`);
 console.log(`runtime    ${summary.vfs.join(', ')}`);
 console.log(`version    ${summary.version}`);

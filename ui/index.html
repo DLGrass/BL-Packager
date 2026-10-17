@@ -6,6 +6,10 @@
 <title>Bilup Packager - 把 Scratch 作品打包成 HTML 和 EXE</title>
 <meta name="description" content="Bilup Packager：把 Scratch 作品打包成单文件 HTML 或 Windows 可执行文件。零依赖，作品不会离开这台电脑。">
 <meta name="theme-color" content="#75c1c4">
+<!-- Relative on purpose: the deployed site lives under /BL-Packager/, so a
+     root-absolute href would 404. The mark is drawn here, not recolorable from
+     CSS -- a favicon is its own document. -->
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <style>
   /* Geometry follows TurboWarp/packager's src/p4 UI: a centred column of 625px
      cards, a 6px accent bar on top of the noteworthy ones, and flat
@@ -100,6 +104,7 @@
   .hero-mark { flex: none; width: 46px; height: 43.3px; color: var(--link); }
   .hero-head > div { min-width: 0; }
   .hero-head h1 { margin: 0 0 2px; }
+  .slogan { margin: 0 0 2px; color: var(--link); font-size: .95em; letter-spacing: .02em; }
   .hero-head .version { margin: 0; }
   .lede { margin: 14px 0 12px; }
   .facts { margin: 12px 0; padding-left: 1.15em; }
@@ -262,6 +267,7 @@
       </svg>
       <div>
         <h1>Bilup Packager</h1>
+        <p class="slogan">让创作锦上添花</p>
         <p class="version" id="versionLine">本地打包器</p>
       </div>
     </div>

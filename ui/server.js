@@ -219,6 +219,17 @@ const serveUi = (res) => {
   res.end(body);
 };
 
+const serveFavicon = (res) => {
+  const body = fs.readFileSync(path.join(UI_DIR, 'favicon.svg'));
+  res.writeHead(200, {
+    'Content-Type': 'image/svg+xml',
+    'Content-Length': body.length,
+    // The mark changes about never; a day of caching saves a request per page.
+    'Cache-Control': 'public, max-age=86400'
+  });
+  res.end(body);
+};
+
 const handleHealth = (res) => sendJson(res, 200, {
   ok: true,
   node: process.version,
@@ -406,6 +417,7 @@ const createServer = ({allowAnyHost = false, buildRoot = ROOT} = {}) => {
 
     const route = async () => {
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return serveUi(res);
+      if (req.method === 'GET' && url.pathname === '/favicon.svg') return serveFavicon(res);
       if (req.method === 'GET' && url.pathname === '/api/health') return handleHealth(res);
       if (req.method === 'GET' && url.pathname === '/api/artifact') return handleArtifact(res, url.searchParams, ctx);
       if (req.method === 'POST' && url.pathname === '/api/inspect') return handleInspect(req, res, url.searchParams, ctx);

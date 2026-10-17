@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="154.59911 153.05 53.9 53.9">
+  <!--
+    Bilup's mark, cropped out of the official lockup (bilup-logo.svg in
+    scratch-gui), squared off so the browser does not letterbox it in the tab.
+    The fill is hard-coded rather than currentColor: a favicon is its own
+    document, so there is no page colour to inherit.
+  -->
+  <style>
+    path { fill: #1f7a7e; }
+    /* A dark tab strip is about #292a2d here; the brand teal all but vanishes
+       on it, so the lighter tint of the same hue takes over. */
+    @media (prefers-color-scheme: dark) { path { fill: #75c1c4; } }
+  </style>
+  <path d="M166.84911,154.64907h17.15l-4.9,4.9h-9.8l-9.8,9.8v19.6l-4.9,-4.9v-17.15l12.25,-12.25M154.59911,188.94907v14.7h4.9v-9.8l-4.9,-4.9M188.89911,154.64907h14.7l-14.7,14.7h-14.7l-4.9,4.9v19.6l-4.9,4.9v-26.95l7.35,-7.35h14.7l4.9,-4.9h-7.35l4.9,-4.9M164.39911,203.64907l4.9,-4.9h22.05l7.35,-7.35v-7.35h-9.8l4.9,-4.9h9.8v14.7l-9.8,9.8h-29.4M203.59911,159.54907v4.9l-19.6,19.6h-4.9z"/>
+</svg>

@@ -770,7 +770,20 @@ const main = async () => {
         const res = await fetch(`${base}/`);
         assert.strictEqual(res.status, 200);
         assert.match(res.headers.get('content-type'), /text\/html/);
-        assert.match(await res.text(), /Bilup Packager/);
+        const html = await res.text();
+        assert.match(html, /Bilup Packager/);
+        assert.match(html, /让创作锦上添花/);
+      });
+
+      await test('serves the tab icon the page links to', async () => {
+        const html = await (await fetch(`${base}/`)).text();
+        // The href has to stay relative: the deployed site lives under
+        // /BL-Packager/, where a root-absolute path points at nothing.
+        assert.match(html, /<link rel="icon"[^>]*href="favicon\.svg"/);
+        const res = await fetch(`${base}/favicon.svg`);
+        assert.strictEqual(res.status, 200);
+        assert.match(res.headers.get('content-type'), /image\/svg\+xml/);
+        assert.match(await res.text(), /^<svg[^>]*viewBox=/);
       });
 
       await test('GET /api/health reports the runtime and the toolchain', async () => {

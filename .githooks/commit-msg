@@ -6,5 +6,13 @@
 #
 # Installed by `node .githooks/install.js`, which runs automatically through the
 # `prepare` script on `pnpm install`. To skip once: git commit --no-verify.
+#
+# The hook directory is resolved with POSIX parameter expansion rather than
+# $(dirname "$0"): dirname is an external binary, and a clone whose PATH is
+# missing coreutils (or a hook invoked from a tool that scrubs PATH) then
+# silently ends up looking for check.js in the repository root.
 
-exec node "$(dirname "$0")/check.js" "$1"
+hook_dir=${0%/*}
+[ "$hook_dir" = "$0" ] && hook_dir=.
+
+exec node "$hook_dir/check.js" "$1"

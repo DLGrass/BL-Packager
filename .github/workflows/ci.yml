@@ -1,34 +1,19 @@
-# Shaped after Bilup/packager's own CI, with the parts that do not exist here
-# replaced by the parts that do. What came over: the pnpm -> Node -> install ->
-# test skeleton, the `cache: pnpm` step, `concurrency` cancellation, read-only
-# `permissions`, and a deploy job that runs after the tests pass.
+# Two jobs and nothing else: build the static site, then publish it to GitHub
+# Pages. Everything that used to gate that deploy -- the Node test suite, the
+# web UI driven in a real browser, the commit-message check -- is gone from CI
+# on request; those checks still exist and still run locally (`pnpm test`,
+# `pnpm run ui-check`, and the commit-msg hook installed by `pnpm install`).
 #
-#   build / build-standalone-prod   kept in spirit, renamed: `pnpm build:site`
-#                                   assembles the static site (src/build-site.js)
-#                                   and its output is what gets deployed.
-#   deploy -> `web` branch          replaced. Bilup pushes a prebuilt page to a
-#                                   branch; the same result here is published
-#                                   through GitHub's Pages actions, which needs a
-#                                   token scope but no branch and no force-push.
+# One input is deliberately absent from the repository, and the build cannot run
+# without it:
 #
-# CI runs the only things here that can actually fail: the Node test suite, the
-# web UI driven in a real browser (both as a server and as the static site), and
-# the shape of the commit messages.
+#   vendor/scaffolding-min.js   the runtime the produced HTML embeds. It is a
+#                               build artifact of TurboWarp's scaffolding and is
+#                               not redistributed here; see README section 4.
 #
-# Two inputs are deliberately absent from the repository, and a fresh clone has
-# to supply them before anything can pass:
-#
-#   <repo>/../_ref/turbowarp-packager   the real .sb3 fixtures the round-trip
-#                                       tests run against. They are upstream's
-#                                       files, so they were not copied in here.
-#   vendor/scaffolding-min.js           the runtime the produced HTML embeds.
-#                                       It is a build artifact of TurboWarp's
-#                                       scaffolding and is not redistributed
-#                                       here; see README section 4.
-#
-# Neither is optional. test/run.js fails rather than skips when the fixtures are
-# missing -- on purpose, because a fixture that is silently skipped is a fixture
-# that is not testing anything. Same reasoning applies to the runtime bundle.
+# Pages must be switched to "GitHub Actions" as its source once, in repository
+# settings; until then the deploy fails with the message configure-pages prints,
+# which is clearer than anything that could be added here.
 
 name: CI
 
@@ -46,53 +31,13 @@ permissions:
   contents: read
 
 jobs:
-  commits:
-    # The commit-msg hook only exists in clones that ran `pnpm install`, so the
-    # same rule is enforced here where it cannot be skipped with --no-verify.
-    # It is a separate job so a bad message is reported as such instead of
-    # showing up as a test failure.
-    name: commit messages
+  build:
+    name: build the site
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Full history: the gate needs the range this push introduced.
-          fetch-depth: 0
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      # Nothing to install: the rule is two files of plain Node. Empty base
-      # (workflow_dispatch, or a brand new branch) falls back to the tip inside
-      # check.js, so this never re-flunks commits made before the rule existed.
-      - name: Check the messages in this push
-        env:
-          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          TIP: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-        run: node .githooks/check.js --range "$BASE" "$TIP"
-
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      # The two legs are independent; one failing does not make the other's
-      # result uninteresting.
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-
-      # git creates the intermediate _ref/ directory itself. The path matters:
-      # test/run.js resolves it as path.join(ROOT, '..', '_ref', ...), so it must
-      # sit *next to* the checkout, not inside it.
-      - name: Check out TurboWarp/packager for the test fixtures
-        shell: bash
-        run: >
-          git clone --depth 1 https://github.com/TurboWarp/packager.git
-          "$GITHUB_WORKSPACE/../_ref/turbowarp-packager"
-
+      # The bundle embeds the runtime, so the build cannot run without it.
       - name: Fetch the runtime scripts that are not redistributed here
         shell: bash
         run: |
@@ -112,84 +57,23 @@ jobs:
           cache: pnpm
 
       # There is nothing to download, so this is really a check that the
-      # committed pnpm-lock.yaml still matches package.json. It also runs the
-      # `prepare` script, which is what installs the commit-msg hook locally.
+      # committed pnpm-lock.yaml still matches package.json.
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Test
-        run: pnpm test
-
-      # Not a build: a smoke test that the CLI entry points still parse and
-      # still produce the file a user would ask them for. The exe target is
-      # excluded on purpose -- it needs MSVC and is documented as a local step.
-      - name: Pack the sample project through the CLI
-        run: pnpm pack:html ../_ref/turbowarp-packager/static/example.sb3 -o out/ci-smoke.html
-
-      - name: Upload the packed sample
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-smoke-${{ matrix.os }}
-          path: out/ci-smoke.html
-          if-no-files-found: error
-          retention-days: 7
-
-  ui-check:
-    # Only Windows: bench/ui-check.js looks for Edge/Chrome in the standard
-    # Windows install locations, and it is the browser-side wiring (the drop
-    # handler, the option plumbing, the blob download) that it exists to cover.
-    name: web UI in a real browser (windows)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Fetch the runtime scripts that are not redistributed here
-        shell: bash
-        run: |
-          curl -fsSL -o vendor/scaffolding-min.js \
-            https://packager.turbowarp.org/scaffolding/scaffolding-min.js
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
-
-      # ui-check packs a project that already exists on disk; it does not make
-      # one. bench/make-project.js is deterministic (fixed seeds), so CI and a
-      # local run pack the same bytes.
-      - name: Generate the project the page will pack
-        run: pnpm make-project
-
-      # The assertion is that the blob the browser ends up holding is
-      # byte-identical to what the CLI writes for the same project.
-      - name: Pack through the page (single-file HTML)
-        run: pnpm run ui-check
-
-      - name: Pack through the page (Windows exe resources)
-        run: pnpm run ui-check --target exe
-
-      # And the same page again with no server behind it: the bundle has to pack
-      # in a Worker on its own, because that is all GitHub Pages can serve.
-      - name: Build the static site
+      - name: Build the site
         run: pnpm build:site
 
-      - name: Pack through the site (no server, everything in the browser)
-        run: pnpm run ui-check --site
+      # Fails early with the settings hint if Pages is not on "GitHub Actions".
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
 
   deploy:
-    # GitHub Pages, at https://<owner>.github.io/<repo>/. Pages must be switched
-    # to "GitHub Actions" as its source once, in repository settings; until then
-    # this job fails with the message configure-pages prints, which is clearer
-    # than anything that could be added here.
     name: deploy the site
-    needs: [commits, test, ui-check]
+    needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # A deploy that is already publishing should finish; cancelling it midway is
@@ -205,34 +89,6 @@ jobs:
       pages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-
-      # The bundle embeds the runtime, so the build cannot run without it.
-      - name: Fetch the runtime scripts that are not redistributed here
-        shell: bash
-        run: |
-          curl -fsSL -o vendor/scaffolding-min.js \
-            https://packager.turbowarp.org/scaffolding/scaffolding-min.js
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
-
-      - name: Build the site
-        run: pnpm build:site
-
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
       - name: Publish
         id: publish
         uses: actions/deploy-pages@v4

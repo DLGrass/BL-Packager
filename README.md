@@ -316,7 +316,7 @@ node bench/ui-check.js --site
 
 `site/` 里**没有任何服务端**：把四个文件拷到任意静态托管上，拖进一个 sb3，HTML 就在浏览器里生成。
 [dlgrass.github.io/BL-Packager](https://dlgrass.github.io/BL-Packager/) 就是这份产物，
-由 CI 在 `main` 通过全部作业后发布（见 §5）。
+由 CI 在 `main` 上 `build` 完就发布（见 §5）。
 
 **难点不在页面，在于管线原本只认 Node。** `src/lib/` 用了四样浏览器没有的东西，所以每一样都在
 仓库内重写了一份，而不是给站点留一个「需要服务器」的洞：
@@ -365,10 +365,10 @@ Huffman**，省掉了动态 Huffman 表那部分开销。试过加 lazy matching
 把 `deflate` 的输出交给真实的 `zlib.inflateSync` 解、把 `md5` 与 `node:crypto` 对拍、
 把 Buffer 垫片与真 Buffer 的每一次读写对拍，共 5 项。
 
-**部署**：CI 里 `deploy` 作业在 `commits`/`test`/`ui-check` 全过后跑（只对 push 到 `main`），
-用 `actions/configure-pages` + `upload-pages-artifact`（`path: site`）+ `deploy-pages`。
-仓库设置里**必须把 Pages 的源改成 "GitHub Actions"**（Settings → Pages → Source），
-这是唯一需要人工做一次的步骤；没改之前该作业会失败，报的是 `configure-pages` 自己那句提示。
+**部署**：CI 只有 `build` 和 `deploy` 两步——`build` 用 `actions/configure-pages` +
+`upload-pages-artifact`（`path: site`）把站点传成 artifact，`deploy` 再用 `deploy-pages` 发布
+（只对 push 到 `main`）。仓库设置里**必须把 Pages 的源改成 "GitHub Actions"**（Settings → Pages → Source），
+这是唯一需要人工做一次的步骤；没改之前 `configure-pages` 会失败，报它自己那句提示。
 Pages 站点是**公开**的，所以别把私有作品传上去打包——它真的会在人家的服务器上跑一遍。
 
 ### 4.3 运行时脚本
@@ -510,59 +510,53 @@ PNG 8.60 MB（deflate 只省 0.0%）、WAV 5.05 MB（省 7.5%）、SVG 2.46 MB�
 
 ### CI 与 Release（GitHub Actions）
 
-工作流的骨架是从 **Bilup/packager** 的 `.github/workflows/` 搬过来的（pnpm → Node → install → test、
-`cache: pnpm`、`concurrency` 取消、只读 `permissions`、以及一个在测试之后跑的 `deploy`），
-只留这个仓库真实存在的东西。搬过来但**换了内容**的两条，理由写在 `ci.yml` 开头：
-
-| 那边 | 这里 |
-|---|---|
-| `build` / `build-standalone-prod` | 打包器本身仍然没有构建步骤（`node` 直接跑的 CommonJS），但**站点**要构建：`pnpm build:site` 产出 `site/`，也就是部署物 |
-| `deploy` → `web` 分支 | 改成 **GitHub Pages actions**（`configure-pages` + `upload-pages-artifact` + `deploy-pages`）。那边是 force-push 一个预构建分支，这里不需要分支、不需要强推，发布地址也自带 |
-| `package.yml`（每周刷 lockfile） | 没搬：零依赖，锁文件是个存根，每周跑只会得到一个空提交 |
-
-四个作业：
-
-- **`.github/workflows/ci.yml`** — push 到 `main` 与所有 PR：
+CI 只有两步：**`build` 构建静态站点，`deploy` 把它发到 Pages**。
 
 | 作业 | 平台 | 做什么 |
 |---|---|---|
-| `commits` | ubuntu | 校验本次 push 引入的提交信息（见下一节） |
-| `test` | ubuntu + windows | `pnpm test`（55 项），外加一次 CLI 冒烟打包，产物传 artifact |
-| `ui-check` | windows | 在真实浏览器里驱动网页版，把**页面下载到的 blob** 与 CLI 的字节比对；再 `build:site` 后用 `--site` 跑一遍**没有服务端**的那条路 |
-| `deploy` | ubuntu | 仅在 push 到 `main` 且**上面三件全过**时发布 `site/` 到 Pages（`needs: [commits, test, ui-check]`） |
+| `build` | ubuntu | 取 `vendor/scaffolding-min.js` → `pnpm install` → `pnpm build:site` → `configure-pages` → 把 `site/` 传成 Pages artifact |
+| `deploy` | ubuntu | 只在 push 到 `main` 时发布上一个作业传上来的 artifact（`needs: build`），不再重复构建 |
+
+`build` 在 push、PR 和手动触发时都跑，`deploy` 只看 `main` 的 push——所以 PR 上能验证的只有
+「站点还构建得出来」。**测试套件、真实浏览器里的网页版比对、提交信息校验都不在 CI 里了**，
+它们仍然存在，只是回到本机跑：
+
+```bash
+pnpm test            # 55 项：管线、站点构建、浏览器侧编解码器、网页版的 HTTP 端到端
+pnpm run ui-check    # 真实浏览器里把页面打出来的包与 CLI 的字节比对
+```
 
 `deploy` 用 `concurrency: group: pages, cancel-in-progress: false`：已经在发布的那次应该跑完，
 中途取消正是「站点只更新一半」的由来。它只多要两个权限（`pages: write`、`id-token: write`），
-其余作业仍是只读。**第一次启用需要在仓库设置里把 Pages 的源选成 "GitHub Actions"**，
-这一步 CI 做不到（要仓库管理权限），不做的话该作业会带着 `configure-pages` 的提示失败。
-- **`.github/workflows/release.yml`** — 推 `v*` 标签触发：先跑测试，并校验「标签名 == `package.json`
-  的 version」（`v0.2.0` 配 `0.1.0` 的包会被拦住）；再用 `git archive` 打源码包——它只取标签那棵树的文件，
-  所以自动排除 `node_modules`、`out/`、`vendor/`，并服从 `.gitattributes` 的 `export-ignore`；
-  最后连同 `SHA256SUMS.txt` 挂到 Release 上，正文由提交信息自动生成。带 `-` 的标签
-  （`v0.2.0-rc.1`）自动标成 pre-release 且不抢 `latest`。
-  **源码包不含 `vendor/scaffolding-min.js`**（上游产物、不分发，见 §7），解压后按 §4 补一次即可。
-- **`.github/dependabot.yml`** — 上游是对 npm 每日扫；这里没有依赖，所以主要盯 **actions 的版本**（每周），
-  npm 那一档留作兜底（每月）。两档的提交前缀都是 Conventional type，机器人 PR 也过同一道卡。
+`build` 仍是只读。**第一次启用需要在仓库设置里把 Pages 的源选成 "GitHub Actions"**，
+这一步 CI 做不到（要仓库管理权限），不做的话 `configure-pages` 会带着提示失败。
 
-`test` / `ui-check` / `deploy` 都得先把**仓库故意没包含**的东西补上——不补不是「跳过」，是直接失败：
+`build` 得先把**仓库故意没包含**的运行时补上——不补不是「跳过」，是直接失败：
 
-- `../_ref/turbowarp-packager`：上游的真实 `.sb3` 夹具，`git clone --depth 1` 到检出目录
-  **旁边**（`test/run.js` 按 `<repo>/../_ref/...` 找它）；
 - `vendor/scaffolding-min.js`：产物 HTML 要内嵌的运行时，从 `packager.turbowarp.org` 下载。
   实测该地址返回 **1,813,190 字节**，与本机 `vendor/` 里那份**同尺寸**，
   所以 CI 跑的和本机跑的是同一份运行时。
 
-`ui-check` 只有 Windows 一档：`bench/ui-check.js` 按 Windows 的标准安装路径找 Edge/Chrome。
+上游那套 `.sb3` 夹具（`../_ref/turbowarp-packager`）现在只有本机的 `pnpm test` 需要，
+CI 不再克隆它。
 
 CI **故意不做**两件事，因为在这里做只会得到假结论：
 
 - **不编译 exe**：要 MSVC + 下载 WebView2 SDK，费钱且慢，而 `exe/build.cmd` 的价值在于
-  本机那份 MSVC（它甚至写死了本机的 vcvars 与 Windows Kits 路径）；测试覆盖的是它**之前**那一步
-  （资源落地），那一步在 CI 里跑。
+  本机那份 MSVC（它甚至写死了本机的 vcvars 与 Windows Kits 路径）。
 - **不跑 `bench/run.js`**：它测的打开耗时，结论本身就是「几个变体落在噪声内」。
   放进 CI 会得到精确到毫秒的假差异——那正是这一节反复在提醒的事。
 
-想在本机复现这些作业，就是上面那几条命令，外加「夹具 + 运行时」这两个前置文件。
+`.github/` 下另外两个文件不属于上面这条流水线：
+
+- **`.github/workflows/release.yml`** — 推 `v*` 标签触发：先跑 `pnpm test`（**测试唯一还会在
+  服务端跑的地方**），并校验「标签名 == `package.json` 的 version」（`v0.2.0` 配 `0.1.0` 的包会被拦住）；
+  再用 `git archive` 打源码包——它只取标签那棵树的文件，所以自动排除 `node_modules`、`out/`、
+  `vendor/`，并服从 `.gitattributes` 的 `export-ignore`；最后连同 `SHA256SUMS.txt` 挂到 Release 上，
+  正文由提交信息自动生成。带 `-` 的标签（`v0.2.0-rc.1`）自动标成 pre-release 且不抢 `latest`。
+  **源码包不含 `vendor/scaffolding-min.js`**（上游产物、不分发，见 §7），解压后按 §4 补一次即可。
+- **`.github/dependabot.yml`** — 上游是对 npm 每日扫；这里没有依赖，所以主要盯 **actions 的版本**（每周），
+  npm 那一档留作兜底（每月）。两档的提交前缀都是 Conventional type，和手写提交同一种格式。
 
 ### 提交规范（Conventional Commits）
 
@@ -579,16 +573,17 @@ scope    可选，小写；subject 祈使句、不加句号；整行 ≤ 72 字�
 `Merge ...`、`Revert "..."` 与 rebase 用的 `fixup!` / `squash!` / `amend!` 豁免。
 
 规则只有**一份**：`.githooks/conventional.js`（纯函数，`test/run.js` 里有 5 项断言盯着它）。
-两个地方调它，所以「本机过了」和「CI 过了」不会分叉：
+两个入口，用的是同一段代码，所以「本机判合规」和「事后批量查」不会分叉：
 
-- **本机**：`pnpm install` 的 `prepare` 会跑 `.githooks/install.js`，把 `core.hooksPath` 指到
+- **提交时**：`pnpm install` 的 `prepare` 会跑 `.githooks/install.js`，把 `core.hooksPath` 指到
   `.githooks/`（只改本仓库的 `.git/config`），`commit-msg` 钩子不合规就直接拒绝提交。
   手动装一次也行：`node .githooks/install.js`。临时绕过：`git commit --no-verify`。
-- **CI**：`commits` 作业拿同一个脚本查本次 push 的范围，绕不过去。
+- **批量查**：`node .githooks/check.js --range <base> <tip>`。CI 里原先有个 `commits` 作业跑它，
+  现在那个作业已经删掉了——脚本留着，想查一段历史时手动跑。
 
 > 已有的 5 条提交（`5a8c9e0`…`4f01895`）早于这条规则，按约定**不重写**：改写已推送的历史要 force push，
-> 代价大于收益。所以 CI 只查本次 push **新增**的提交；算不出范围时（新分支、手动触发）退化成只看 tip，
-> 而不是把整段历史重新判红。
+> 代价大于收益。所以 `check.js --range` 只看你给的那一段；范围算不出来时（新分支、手动触发）
+> 退化成只看 tip，而不是把整段历史重新判红。
 
 ---
 

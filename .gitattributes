@@ -1,0 +1,7 @@
+# Keep the release archive to what somebody downloading it actually needs.
+# `git archive` applies these, so the zip built by .github/workflows/release.yml
+# and the one you can build by hand are the same file. The design notes in
+# temp/ stay in: they are the only written record of why the container looks the
+# way it does.
+.github/ export-ignore
+.workbuddy/ export-ignore

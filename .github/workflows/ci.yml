@@ -1,5 +1,18 @@
-# CI runs the only two things here that can actually fail: the Node test suite,
-# and the web UI driven in a real browser.
+# Shaped after Bilup/packager's own CI, with the parts that do not exist here
+# replaced by the parts that do. What came over: the pnpm -> Node -> install ->
+# test skeleton, the `cache: pnpm` step, `concurrency` cancellation, and
+# read-only `permissions`. What did not, and why:
+#
+#   build / build-standalone-prod   there is no build step to run. The packager
+#                                   is plain CommonJS executed by node; a bundle
+#                                   would only hide the files it ships.
+#   deploy -> `web` branch          that pushes a prebuilt standalone page. The
+#                                   web UI here is a server (ui/server.js shells
+#                                   out to node:zlib to pack), so there is no
+#                                   single HTML file to publish.
+#
+# CI runs the only things here that can actually fail: the Node test suite, the
+# web UI driven in a real browser, and the shape of the commit messages.
 #
 # Two inputs are deliberately absent from the repository, and a fresh clone has
 # to supply them before anything can pass:
@@ -32,6 +45,32 @@ permissions:
   contents: read
 
 jobs:
+  commits:
+    # The commit-msg hook only exists in clones that ran `pnpm install`, so the
+    # same rule is enforced here where it cannot be skipped with --no-verify.
+    # It is a separate job so a bad message is reported as such instead of
+    # showing up as a test failure.
+    name: commit messages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the gate needs the range this push introduced.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Nothing to install: the rule is two files of plain Node. Empty base
+      # (workflow_dispatch, or a brand new branch) falls back to the tip inside
+      # check.js, so this never re-flunks commits made before the rule existed.
+      - name: Check the messages in this push
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          TIP: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: node .githooks/check.js --range "$BASE" "$TIP"
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -69,14 +108,30 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: pnpm
 
       # There is nothing to download, so this is really a check that the
-      # committed pnpm-lock.yaml still matches package.json.
+      # committed pnpm-lock.yaml still matches package.json. It also runs the
+      # `prepare` script, which is what installs the commit-msg hook locally.
       - name: Install
         run: pnpm install --frozen-lockfile
 
       - name: Test
         run: pnpm test
+
+      # Not a build: a smoke test that the CLI entry points still parse and
+      # still produce the file a user would ask them for. The exe target is
+      # excluded on purpose -- it needs MSVC and is documented as a local step.
+      - name: Pack the sample project through the CLI
+        run: pnpm pack:html ../_ref/turbowarp-packager/static/example.sb3 -o out/ci-smoke.html
+
+      - name: Upload the packed sample
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-smoke-${{ matrix.os }}
+          path: out/ci-smoke.html
+          if-no-files-found: error
+          retention-days: 7
 
   ui-check:
     # Only Windows: bench/ui-check.js looks for Edge/Chrome in the standard
@@ -100,6 +155,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: pnpm
 
       - name: Install
         run: pnpm install --frozen-lockfile

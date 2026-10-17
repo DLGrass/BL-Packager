@@ -1,0 +1,130 @@
+# Tag-driven release, following Bilup/packager's release workflow: verify, then
+# attach an artifact to a GitHub Release whose body is generated from the
+# commits. Localized in three places:
+#
+#   what the artifact is   Bilup ships a built `dist/standalone.html`. There is
+#                          no build here, so the artifact is the source archive
+#                          a user actually needs: `git archive` of the tag,
+#                          honouring the export-ignore rules in .gitattributes.
+#   what it does not ship  vendor/scaffolding-min.js is upstream's artifact and
+#                          is not redistributed (README section 4), so the zip
+#                          leaves it out and the README says how to fetch it.
+#   the gate before it     the tag must name the version in package.json, and
+#                          the same two inputs CI needs (fixtures + runtime) are
+#                          fetched so the tests can run first. A release that
+#                          skips the tests is a release nobody verified.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify the tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the runtime scripts that are not redistributed here
+        shell: bash
+        run: |
+          curl -fsSL -o vendor/scaffolding-min.js \
+            https://packager.turbowarp.org/scaffolding/scaffolding-min.js
+
+      - name: Check out TurboWarp/packager for the test fixtures
+        shell: bash
+        run: >
+          git clone --depth 1 https://github.com/TurboWarp/packager.git
+          "$GITHUB_WORKSPACE/../_ref/turbowarp-packager"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      # A release tagged v0.2.0 that carries package.json 0.1.0 is a lie that
+      # gets cached forever, so it stops the pipeline here rather than after the
+      # Release has been created.
+      - name: Check the tag against package.json
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          # A pre-release suffix (0.2.0-rc.1) is allowed to describe the same
+          # version as package.json; the tag is what names the pre-release.
+          BASE="${TAG%%-*}"
+          PKG="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG package.json=$PKG"
+          if [ "$BASE" != "$PKG" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $PKG"
+            exit 1
+          fi
+
+  package:
+    name: build the source archive
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `git archive` rather than a hand-rolled zip: it takes exactly the files
+      # in the tag's tree (so no node_modules, no vendor/, no out/) and applies
+      # .gitattributes export-ignore. ZIP timestamps come from the commit, so
+      # re-running this job on the same tag produces the same bytes.
+      - name: Archive the tag
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          NAME="bl-packager-$VERSION"
+          git archive --format=zip --prefix="$NAME/" -o "$NAME.zip" HEAD
+          unzip -l "$NAME.zip" | tail -3
+          sha256sum "$NAME.zip" | tee SHA256SUMS.txt
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: |
+            bl-packager-*.zip
+            SHA256SUMS.txt
+          if-no-files-found: error
+
+  release:
+    name: publish
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+
+      # v2 is the maintained major of softprops/action-gh-release; it needs
+      # `contents: write`, which is granted above and nowhere else.
+      - name: Create the Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bl-packager-*.zip
+            SHA256SUMS.txt
+          # Notes are generated from the Conventional Commit subjects, which is
+          # the other half of why the messages are gated.
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          # v0.2.0-rc.1 ships as a pre-release and does not become "latest".
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}

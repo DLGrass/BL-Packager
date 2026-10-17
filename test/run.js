@@ -21,6 +21,11 @@ const {inflateRawJS} = require('../src/runtime/inflate-raw');
 const {openBlpk} = require('../src/runtime/container-reader');
 const {createProjectSource, createInflateRaw} = require('../src/runtime/loader');
 const {checkMessage, subjectOf, TYPES} = require('../.githooks/conventional');
+const {
+  deflateRaw, deflateZlib, adler32, LEN_BASE, LEN_EXTRA, DIST_BASE, DIST_EXTRA
+} = require('../src/lib/deflate');
+const {Buffer: ShimBuffer} = require('../src/lib/bytes');
+const {createHash: md5CreateHash} = require('../src/lib/md5');
 
 const ROOT = path.join(__dirname, '..');
 const REF = path.join(ROOT, '..', '_ref', 'turbowarp-packager');
@@ -1114,6 +1119,100 @@ const main = async () => {
       assert.ok(result.ok, `"${header}" was rejected`);
       assert.strictEqual(result.exempt, true, `"${header}" was not marked exempt`);
     }
+  });
+
+  // -------------------------------------------------------------------------
+  section('[browser codecs]');
+  // -------------------------------------------------------------------------
+  // The static site (src/build-site.js) replaces node:zlib and node:crypto with
+  // these, so "does the bundle pack?" reduces to "are they the same function?".
+  // The reference is always the Node builtin, called here in the same process.
+
+  await test('the deflate encoder produces streams zlib can inflate', () => {
+    const cases = [
+      ['empty', Buffer.alloc(0)],
+      ['one byte', Buffer.from([0x41])],
+      ['three bytes', Buffer.from('abc')],
+      ['ramp', Buffer.from(Array.from({length: 4096}, (_, i) => i & 0xff))],
+      ['zeros', Buffer.alloc(70000)],
+      ['random', crypto.randomBytes(200000)],
+      ['text', Buffer.from('the quick brown fox jumps over the lazy dog\n'.repeat(2000))]
+    ];
+    for (const [name, input] of cases) {
+      const back = zlib.inflateRawSync(deflateRaw(input));
+      assert.strictEqual(back.length, input.length, `${name}: length changed`);
+      assert.ok(back.equals(input), `${name}: round trip differs`);
+    }
+    // Repetitive input must actually shrink, or the "compressor" is a copier.
+    assert.ok(deflateRaw(Buffer.alloc(100000)).length < 20000);
+  });
+
+  await test('the zlib-wrapped encoder round trips through zlib.inflateSync', () => {
+    const input = Buffer.from('hello hello hello hello'.repeat(500));
+    const packed = deflateZlib(input);
+    assert.strictEqual(packed[0], 0x78, 'missing the zlib header');
+    assert.ok(zlib.inflateSync(packed).equals(input));
+    assert.strictEqual(adler32(Buffer.from('Wikipedia')), 0x11e60398);
+  });
+
+  await test('md5 matches node:crypto', () => {
+    for (const length of [0, 1, 55, 56, 64, 65, 1000]) {
+      const input = crypto.randomBytes(length);
+      assert.strictEqual(
+        md5CreateHash().update(input).digest('hex'),
+        crypto.createHash('md5').update(input).digest('hex'),
+        `md5 of ${length} bytes differs`
+      );
+    }
+    // Chunked updates have to concatenate before hashing.
+    const chunked = md5CreateHash();
+    chunked.update(Buffer.from('hello '));
+    chunked.update(Buffer.from('world'));
+    assert.strictEqual(chunked.digest('hex'),
+      crypto.createHash('md5').update('hello world').digest('hex'));
+  });
+
+  await test('the Buffer shim agrees with the real Buffer', () => {
+    const text = 'hello world, 你好世界 🌍';
+    assert.ok(ShimBuffer.from(text).equals(Buffer.from(text)), 'utf8 encode differs');
+    assert.strictEqual(ShimBuffer.from(text).toString(), Buffer.from(text).toString());
+
+    const mine = ShimBuffer.alloc(6);
+    const real = Buffer.alloc(6);
+    for (const target of [mine, real]) {
+      target.writeUInt32LE(0xdeadbeef, 0);
+      target.writeUInt16LE(0x1234, 4);
+    }
+    assert.ok(mine.equals(real), 'writeUInt* differ');
+    assert.strictEqual(mine.readUInt32LE(0), real.readUInt32LE(0));
+    assert.strictEqual(mine.readUInt16LE(4), real.readUInt16LE(4));
+
+    const big = ShimBuffer.alloc(4);
+    big.writeUInt32BE(0x01020304, 0);
+    assert.strictEqual(big.toString('hex'), '01020304');
+
+    assert.ok(ShimBuffer.concat([ShimBuffer.from('abc'), ShimBuffer.from('defg')])
+      .equals(Buffer.from('abcdefg')), 'concat differs');
+    assert.strictEqual(ShimBuffer.from('caf\u00e9', 'latin1').toString('latin1'), 'café');
+    assert.strictEqual(ShimBuffer.from('00ff10', 'hex').toString('hex'), '00ff10');
+    assert.strictEqual(ShimBuffer.from('AAECAwQ=', 'base64').toString('base64'), 'AAECAwQ=');
+
+    // slice() is a view on Buffer (unlike Uint8Array), and the packing code
+    // relies on that when it walks a zip's central directory.
+    const view = ShimBuffer.from('abcdef');
+    view[0] = 0x7a;
+    assert.strictEqual(view.slice(0, 1).toString(), 'z');
+  });
+
+  await test('the constant tables the encoder indexes into are the right length', () => {
+    // A silent off-by-one here would still inflate, just to the wrong bytes, so
+    // the ranges are asserted against the RFC's own numbers.
+    assert.strictEqual(LEN_BASE.length, 29);
+    assert.strictEqual(LEN_EXTRA.length, 29);
+    assert.strictEqual(DIST_BASE.length, 30);
+    assert.strictEqual(DIST_EXTRA.length, 30);
+    assert.strictEqual(LEN_BASE[28], 258, 'the last length code must be 258');
+    assert.strictEqual(DIST_BASE[29], 24577, 'the last distance code must be 24577');
   });
 
   console.log(`\n${passed} passed, ${failed} failed\n`);

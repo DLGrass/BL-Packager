@@ -14,6 +14,7 @@
     "pack:html": "node src/pack.js",
     "pack:exe": "node src/pack-exe.js",
     "ui": "node ui/server.js",
+    "build:site": "node src/build-site.js",
     "make-project": "node bench/make-project.js",
     "bench": "node bench/run.js",
     "ui-check": "node bench/ui-check.js",

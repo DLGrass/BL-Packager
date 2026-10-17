@@ -570,13 +570,17 @@
 
 </main>
 
+<!-- BL:SITE -->
 <script>
 'use strict';
 
 // ---------------------------------------------------------------------------
-// The page is a thin front end: the packing itself happens in ui/server.js,
-// which is the same pipeline the two CLIs use. Everything here is option
-// plumbing, one fetch per action, and rendering the report that comes back.
+// The page is a thin front end: the packing actually happens behind /api/*,
+// which is the same pipeline the two CLIs use. Served by ui/server.js those
+// routes are Node; on the static site (src/build-site.js) the same page gets
+// them from a Worker running the same pipeline, and nothing below changes.
+// Everything here is option plumbing, one request per action, and rendering the
+// report that comes back.
 //
 // The option list and its wording follow TurboWarp's PackagerOptions.svelte, so
 // that a value read here means the same thing as it does upstream. Only the
@@ -584,6 +588,13 @@
 // ---------------------------------------------------------------------------
 
 const $ = (id) => document.getElementById(id);
+
+// One page, two back ends. On the local server this is fetch(); on the static
+// site src/site/local-api.js installs window.__BL_LOCAL__, which answers the
+// same four routes out of a Worker so the browser can pack on its own. Keeping
+// the branch here is why the rest of this file never has to know which it is.
+const apiFetch = (url, init) =>
+  (window.__BL_LOCAL__ ? window.__BL_LOCAL__.request(url, init) : fetch(url, init));
 
 // The wire format, not the DOM shape: 无限克隆 / 角色可穿过边缘 / 增大矢量图分辨率
 // are three checkboxes that map onto maxClones / fencing / maxTextureDimension.
@@ -628,7 +639,10 @@ const DEFAULTS = {
   packagedRuntime: true,
   maxTextureDimension: 2048,
   preload: false,
-  optimizePng: true,
+  // The static site turns this off: its bundled deflate cannot beat the zlib a
+  // PNG already carries, so the attempt only costs time. The checkbox still
+  // works if someone ticks it.
+  optimizePng: window.__BL_DEFAULT_OPTIMIZE_PNG__ !== false,
   noDeflate: false,
   width: 640,
   height: 480,
@@ -837,8 +851,10 @@ const errorFrom = async (res) => {
 
 // --- health ----------------------------------------------------------------
 
-fetch('/api/health').then((r) => r.json()).then((health) => {
-  $('versionLine').textContent = `本地打包器 · Node ${health.node} · 零运行时依赖`;
+apiFetch('/api/health').then((r) => r.json()).then((health) => {
+  $('versionLine').textContent = health.browser
+    ? `浏览器内打包 · v${health.version} · 作品不会离开这台机器`
+    : `本地打包器 · Node ${health.node} · 零运行时依赖`;
 
   const problems = [];
   if (!health.scaffolding.min) {
@@ -915,7 +931,7 @@ $('loadBtn').addEventListener('click', async () => {
   $('loadBtn').disabled = true;
   say('正在解析作品…', 'busy');
   try {
-    const res = await fetch('/api/inspect?filename=' + encodeURIComponent(state.file.name), {
+    const res = await apiFetch('/api/inspect?filename=' + encodeURIComponent(state.file.name), {
       method: 'POST',
       body: state.file
     });
@@ -1000,7 +1016,14 @@ const runWithStatus = async (label, work) => {
 /** Returns the blob URL, or null when the request failed (status already shown). */
 const packHtml = () => runWithStatus('打包中…', async () => {
   clearResult();
-  const res = await fetch('/api/pack?' + toQuery().toString(), {method: 'POST', body: state.file});
+  // `options` is what the in-page client packs with; the query string is what
+  // the Node server gets. Both are produced by readOptions(), so neither side
+  // re-derives an option.
+  const res = await apiFetch('/api/pack?' + toQuery().toString(), {
+    method: 'POST',
+    body: state.file,
+    options: Object.assign(readOptions(), {filename: state.file.name})
+  });
   if (!res.ok) throw new Error(await errorFrom(res));
 
   const report = JSON.parse(decodeURIComponent(res.headers.get('x-pack-stats') || '%7B%7D'));
@@ -1037,7 +1060,7 @@ const packHtml = () => runWithStatus('打包中…', async () => {
 
 const packExe = () => runWithStatus('生成 exe 资源中…', async () => {
   clearResult();
-  const res = await fetch('/api/pack-exe?' + toQuery().toString(), {method: 'POST', body: state.file});
+  const res = await apiFetch('/api/pack-exe?' + toQuery().toString(), {method: 'POST', body: state.file});
   if (!res.ok) throw new Error(await errorFrom(res));
   const data = await res.json();
   const r = data.report;

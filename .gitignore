@@ -4,6 +4,12 @@ vendor/*.js
 !vendor/.gitkeep
 *.log
 
+# The static site: built by src/build-site.js, published to Pages by CI. It
+# embeds the runtime bundle, so it is a build product, not a source tree.
+# Anchored on purpose: an unanchored "site/" also swallows src/site/, which is
+# hand-written source (the browser client and the worker bridge).
+/site/
+
 # exe build output: the payload resources, the compiled binaries, and the
 # downloaded WebView2 SDK. All of it regenerates from src/pack-exe.js + build.cmd.
 exe/build/

@@ -6,6 +6,7 @@
 //   node bench/ui-check.js --target exe                      # the exe resource path
 //   node bench/ui-check.js --sb3 out/bench/bench.sb3 --shot out/ui.png
 //   node bench/ui-check.js --theme dark --shot out/ui-dark.png
+//   node bench/ui-check.js --site --shot out/site.png        # the static site
 //
 // test/run.js covers the HTTP API but stops at the socket: it cannot tell
 // whether the page's own wiring works — the drop handler, the option plumbing,
@@ -16,7 +17,11 @@
 // *downloaded blob's byte length* back out of the page.
 //
 // That last step is the point: the assertion is that the bytes the browser ends
-// up holding equal what src/pack.js writes for the same project.
+// up holding equal what src/pack.js writes for the same project. With --site the
+// page packs through a Worker instead of the server, so the two numbers cannot be
+// equal (the bundle carries its own deflate); the assertion there is that the
+// page really took the local path and that the artifact is the right order of
+// magnitude, with both numbers printed for the record.
 
 const fs = require('node:fs');
 const http = require('node:http');
@@ -70,6 +75,39 @@ const getJson = (url) => new Promise((resolve, reject) => {
 });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// The site is static files only; Pages would serve them exactly like this.
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.json': 'application/json'
+};
+
+const staticServer = (root) => http.createServer((req, res) => {
+  const url = new URL(req.url, 'http://127.0.0.1');
+  const relative = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).replace(/^\/+/, '');
+  const file = path.resolve(root, relative);
+  if (!file.startsWith(path.resolve(root))) {
+    res.writeHead(403);
+    res.end('outside the site');
+    return;
+  }
+  fs.readFile(file, (error, bytes) => {
+    if (error) {
+      res.writeHead(404, {'Content-Type': 'text/plain; charset=utf-8'});
+      res.end('not found');
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
+      'Content-Length': bytes.length
+    });
+    res.end(bytes);
+  });
+});
 
 /** Minimal CDP client: Node 22 ships a global WebSocket, so no dependency. */
 const connect = async (wsUrl) => {
@@ -159,16 +197,23 @@ const main = async () => {
   const shotPath = arg('--shot', null);
   const theme = arg('--theme', null);
   const target = arg('--target', 'html') === 'exe' ? 'exe' : 'html';
+  const siteMode = argv.includes('--site');
+  if (siteMode && target === 'exe') throw new Error('--site has no exe target: the site hides it on purpose');
   if (!fs.existsSync(sb3Path)) {
     throw new Error(`${sb3Path} not found — run: node bench/make-project.js`);
   }
   const sb3 = fs.readFileSync(sb3Path);
   const fileName = path.basename(sb3Path);
-  console.log(`check       ${fileName} -> ${target}`);
+  console.log(`check       ${fileName} -> ${target}${siteMode ? ' (static site)' : ''}`);
 
   // What the CLI would produce for this project with the UI's defaults. For the
   // exe target the artifact the page offers is the gzipped resource, not the HTML.
-  const expectedHtml = packToHtml(sb3, {mode: 'fast', inputPath: fileName}).html;
+  // The site defaults PNG recompression off, so the reference has to match.
+  const expectedHtml = packToHtml(sb3, {
+    mode: 'fast',
+    inputPath: fileName,
+    optimizePng: siteMode ? false : true
+  }).html;
   const expectedBytes = target === 'exe'
     ? zlib.gzipSync(expectedHtml, {level: 9}).length
     : expectedHtml.length;
@@ -179,7 +224,11 @@ const main = async () => {
     ? '#downloads a[download="app.html.gz"]'
     : '#downloads a[download]';
 
-  const server = createServer();
+  if (siteMode && !fs.existsSync(path.join(ROOT, 'site', 'app.js'))) {
+    throw new Error('site/app.js is missing — run: node src/build-site.js');
+  }
+
+  const server = siteMode ? staticServer(path.join(ROOT, 'site')) : createServer();
   const uiPort = await listen(server, 0, '127.0.0.1');
   const uiUrl = `http://127.0.0.1:${uiPort}/`;
   const debugPort = await freePort();
@@ -414,10 +463,38 @@ const main = async () => {
     const buildLog = await readText('#log');
     if (buildLog) console.log(`log         ${buildLog}`);
 
-    const matches = result.bytes === expectedBytes;
-    console.log(matches
-      ? 'MATCH       the browser downloaded exactly what the CLI writes'
-      : `MISMATCH    ${result.bytes} vs ${expectedBytes}`);
+    // The site has to have taken the local path. If a stray fetch('/api/pack')
+    // ever crept back in, the page would 404 on Pages and this is what would say
+    // so, instead of a size comparison that happens to pass.
+    let matches;
+    if (siteMode) {
+      const client = JSON.parse(await cdp.evaluate(`JSON.stringify({
+        local: !!window.__BL_LOCAL__,
+        version: window.__BL_VERSION__,
+        line: document.getElementById('versionLine').textContent
+      })`));
+      if (!client.local) throw new Error('window.__BL_LOCAL__ is missing: the page would call a server that is not there');
+      if (!client.line.includes('浏览器内打包')) {
+        throw new Error(`the version line still claims a local server: ${client.line}`);
+      }
+      console.log(`client      ${client.line}`);
+
+      // Not byte equality: the bundle's encoder is fixed-Huffman, so its output
+      // is a little larger. A band is the honest assertion -- wide enough to
+      // survive an encoder tweak, narrow enough to catch a truncated artifact.
+      const ratio = result.bytes / expectedBytes;
+      matches = ratio > 0.9 && ratio < 1.25;
+      console.log(`delta       ${(100 * ratio).toFixed(1)}% of the CLI artifact` +
+        ` (the bundle carries its own deflate)`);
+      console.log(matches
+        ? 'MATCH       the page packed in the browser and produced a plausible artifact'
+        : `MISMATCH    ${result.bytes} bytes is not within 0.9-1.25x ${expectedBytes}`);
+    } else {
+      matches = result.bytes === expectedBytes;
+      console.log(matches
+        ? 'MATCH       the browser downloaded exactly what the CLI writes'
+        : `MISMATCH    ${result.bytes} vs ${expectedBytes}`);
+    }
 
     if (shotPath) {
       // The page is far taller than the headless window, and the interesting

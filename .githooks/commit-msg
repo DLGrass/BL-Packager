@@ -1,0 +1,10 @@
+#!/bin/sh
+# commit-msg hook. A POSIX shim, not the rule itself: git can only execute a
+# script it has an interpreter for, and on Windows that means the sh that ships
+# with Git for Windows. The rule lives in check.js so that test/run.js can
+# assert on it directly.
+#
+# Installed by `node .githooks/install.js`, which runs automatically through the
+# `prepare` script on `pnpm install`. To skip once: git commit --no-verify.
+
+exec node "$(dirname "$0")/check.js" "$1"

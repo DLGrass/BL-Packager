@@ -20,6 +20,7 @@ const {buildContainer, parseContainer, basename} = require('../src/lib/container
 const {inflateRawJS} = require('../src/runtime/inflate-raw');
 const {openBlpk} = require('../src/runtime/container-reader');
 const {createProjectSource, createInflateRaw} = require('../src/runtime/loader');
+const {checkMessage, subjectOf, TYPES} = require('../.githooks/conventional');
 
 const ROOT = path.join(__dirname, '..');
 const REF = path.join(ROOT, '..', '_ref', 'turbowarp-packager');
@@ -1034,6 +1035,86 @@ const main = async () => {
       fs.rmSync(tmpRoot, {recursive: true, force: true});
     }
   }
+
+  // -------------------------------------------------------------------------
+  section('[commit messages]');
+  // -------------------------------------------------------------------------
+  // The rule is a hook and a CI job for the same reason this file exists: a
+  // convention that only lives in a document is not a convention. These cases
+  // are the ones the two of them have to agree on.
+
+  await test('a conventional header is accepted, with and without a scope', () => {
+    for (const header of [
+      'feat: add the release workflow',
+      'fix(ui): keep the download link on the status line',
+      'ci(release): attach the archive to the tag',
+      'refactor(pipeline)!: drop the username parameter'
+    ]) {
+      const result = checkMessage(header);
+      assert.ok(result.ok, `"${header}" was rejected: ${result.reason}`);
+      assert.strictEqual(result.header, header);
+    }
+  });
+
+  await test('every type in the allowlist parses', () => {
+    for (const type of TYPES) {
+      const result = checkMessage(`${type}: do the thing`);
+      assert.ok(result.ok, `${type} was rejected: ${result.reason}`);
+    }
+    // The list is deliberately closed: a new type is a decision, not a typo.
+    assert.ok(!TYPES.includes('feature'));
+    assert.ok(!TYPES.includes('wip'));
+  });
+
+  await test('a header with no type, an unknown type, or an over-long subject is rejected', () => {
+    const cases = [
+      ['Add the release workflow', /not `type\(scope\): subject`/],
+      ['feature: add the release workflow', /not a type/],
+      ['feat add the release workflow', /not `type\(scope\): subject`/],
+      ['Feat: add the release workflow', /not `type\(scope\): subject`/],
+      ['feat:', /not `type\(scope\): subject`/],
+      [`feat: ${'x'.repeat(80)}`, /characters; the limit is 72/],
+      ['feat: add the release workflow.', /ends with a period/],
+      ['feat: ok', /too short/],
+      ['', /the message is empty/]
+    ];
+    for (const [header, expected] of cases) {
+      const result = checkMessage(header);
+      assert.ok(!result.ok, `"${header}" was accepted`);
+      assert.match(result.reason, expected);
+    }
+  });
+
+  await test('git comments and trailer paragraphs do not confuse the parser', () => {
+    const message = [
+      '',
+      '# Please enter the commit message for your changes. Lines starting',
+      '# with \'#\' will be ignored.',
+      'feat(release): attach the source archive to the tag',
+      '',
+      '# On branch main',
+      'Why: a tag with no artifact is just a bookmark.'
+    ].join('\n');
+    const result = checkMessage(message);
+    assert.ok(result.ok, result.reason);
+    assert.strictEqual(result.header, 'feat(release): attach the source archive to the tag');
+    // A custom commentChar must be honoured rather than assumed.
+    assert.strictEqual(subjectOf('; comment\nchore: tidy', ';'), 'chore: tidy');
+    assert.strictEqual(subjectOf('# comment\nchore: tidy'), 'chore: tidy');
+  });
+
+  await test('merge commits and rebase fixups are exempt', () => {
+    for (const header of [
+      'Merge branch \'main\' into feature/release',
+      'Revert "feat: add the release workflow"',
+      'fixup! feat: add the release workflow',
+      'squash! feat: add the release workflow'
+    ]) {
+      const result = checkMessage(header);
+      assert.ok(result.ok, `"${header}" was rejected`);
+      assert.strictEqual(result.exempt, true, `"${header}" was not marked exempt`);
+    }
+  });
 
   console.log(`\n${passed} passed, ${failed} failed\n`);
   process.exit(failed === 0 ? 0 : 1);

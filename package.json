@@ -10,6 +10,7 @@
     "node": ">=18"
   },
   "scripts": {
+    "prepare": "node .githooks/install.js",
     "pack:html": "node src/pack.js",
     "pack:exe": "node src/pack-exe.js",
     "ui": "node ui/server.js",

@@ -430,16 +430,38 @@ PNG 8.60 MB（deflate 只省 0.0%）、WAV 5.05 MB（省 7.5%）、SVG 2.46 MB�
 
 `bench/run.js` 的原始输出在 `out/bench/results.json`（含每次的数值）。
 
-### CI（GitHub Actions）
+### CI 与 Release（GitHub Actions）
 
-`.github/workflows/ci.yml`，在 push 到 `main` 与所有 PR 上跑两个作业：
+工作流的骨架是从 **Bilup/packager** 的 `.github/workflows/` 搬过来的（pnpm → Node → install → test、
+`cache: pnpm`、`concurrency` 取消、只读 `permissions`），只留这个仓库真实存在的东西。
+那边有这个仓库没有对手的部分就没搬，理由写在 `ci.yml` 开头：
+
+| 那边 | 为什么不在这里 |
+|---|---|
+| `build` / `build-standalone-prod` | 这里没有构建步骤：打包器就是 `node` 直接跑的 CommonJS |
+| `deploy` → `web` 分支 | 那是推一个预先构建好的单页。这里的网页版是**服务**（`ui/server.js` 要靠 `node:zlib` 才压得动），没有单文件可发 |
+| `package.yml`（每周刷 lockfile） | 零依赖，锁文件是个存根，每周跑只会得到一个空提交 |
+
+留下来的三件：
+
+- **`.github/workflows/ci.yml`** — push 到 `main` 与所有 PR：
 
 | 作业 | 平台 | 做什么 |
 |---|---|---|
-| `test` | ubuntu + windows | `pnpm test` |
+| `commits` | ubuntu | 校验本次 push 引入的提交信息（见下一节） |
+| `test` | ubuntu + windows | `pnpm test`（50 项），外加一次 CLI 冒烟打包，产物传 artifact |
 | `ui-check` | windows | 在真实浏览器里驱动网页版，把**页面下载到的 blob** 与 CLI 的字节比对 |
 
-两个作业都得先把**仓库故意没包含**的东西补上——不补不是「跳过」，是直接失败：
+- **`.github/workflows/release.yml`** — 推 `v*` 标签触发：先跑测试，并校验「标签名 == `package.json`
+  的 version」（`v0.2.0` 配 `0.1.0` 的包会被拦住）；再用 `git archive` 打源码包——它只取标签那棵树的文件，
+  所以自动排除 `node_modules`、`out/`、`vendor/`，并服从 `.gitattributes` 的 `export-ignore`；
+  最后连同 `SHA256SUMS.txt` 挂到 Release 上，正文由提交信息自动生成。带 `-` 的标签
+  （`v0.2.0-rc.1`）自动标成 pre-release 且不抢 `latest`。
+  **源码包不含 `vendor/scaffolding-min.js`**（上游产物、不分发，见 §7），解压后按 §4 补一次即可。
+- **`.github/dependabot.yml`** — 上游是对 npm 每日扫；这里没有依赖，所以主要盯 **actions 的版本**（每周），
+  npm 那一档留作兜底（每月）。两档的提交前缀都是 Conventional type，机器人 PR 也过同一道卡。
+
+`test` / `ui-check` / `verify` 都得先把**仓库故意没包含**的东西补上——不补不是「跳过」，是直接失败：
 
 - `../_ref/turbowarp-packager`：上游的真实 `.sb3` 夹具，`git clone --depth 1` 到检出目录
   **旁边**（`test/run.js` 按 `<repo>/../_ref/...` 找它）；
@@ -452,11 +474,38 @@ PNG 8.60 MB（deflate 只省 0.0%）、WAV 5.05 MB（省 7.5%）、SVG 2.46 MB�
 CI **故意不做**两件事，因为在这里做只会得到假结论：
 
 - **不编译 exe**：要 MSVC + 下载 WebView2 SDK，费钱且慢，而 `exe/build.cmd` 的价值在于
-  本机那份 MSVC；测试覆盖的是它**之前**那一步（资源落地），那一步在 CI 里跑。
+  本机那份 MSVC（它甚至写死了本机的 vcvars 与 Windows Kits 路径）；测试覆盖的是它**之前**那一步
+  （资源落地），那一步在 CI 里跑。
 - **不跑 `bench/run.js`**：它测的打开耗时，结论本身就是「几个变体落在噪声内」。
   放进 CI 会得到精确到毫秒的假差异——那正是这一节反复在提醒的事。
 
-想在本机复现这两个作业，就是上面那几条命令，外加「夹具 + 运行时」这两个前置文件。
+想在本机复现这些作业，就是上面那几条命令，外加「夹具 + 运行时」这两个前置文件。
+
+### 提交规范（Conventional Commits）
+
+所有提交形如 `type(scope): subject`：
+
+```
+type     build | chore | ci | docs | feat | fix | perf | refactor | revert | style | test
+scope    可选，小写；subject 祈使句、不加句号；整行 ≤ 72 字符
+例       feat(ui): publish the download link on the status line
+         fix: stop dropping the last line of the probe output
+         ci(release): attach the source archive to the tag
+```
+
+`Merge ...`、`Revert "..."` 与 rebase 用的 `fixup!` / `squash!` / `amend!` 豁免。
+
+规则只有**一份**：`.githooks/conventional.js`（纯函数，`test/run.js` 里有 5 项断言盯着它）。
+两个地方调它，所以「本机过了」和「CI 过了」不会分叉：
+
+- **本机**：`pnpm install` 的 `prepare` 会跑 `.githooks/install.js`，把 `core.hooksPath` 指到
+  `.githooks/`（只改本仓库的 `.git/config`），`commit-msg` 钩子不合规就直接拒绝提交。
+  手动装一次也行：`node .githooks/install.js`。临时绕过：`git commit --no-verify`。
+- **CI**：`commits` 作业拿同一个脚本查本次 push 的范围，绕不过去。
+
+> 已有的 5 条提交（`5a8c9e0`…`4f01895`）早于这条规则，按约定**不重写**：改写已推送的历史要 force push，
+> 代价大于收益。所以 CI 只查本次 push **新增**的提交；算不出范围时（新分支、手动触发）退化成只看 tip，
+> 而不是把整段历史重新判红。
 
 ---
 
@@ -596,7 +645,9 @@ ui/             本地网页版（node:http + 一个静态页面，零依赖）
 exe/            WebView2 宿主（C++，MSVC 构建）+ build.cmd
 bench/          合成工程生成器（--art 造 canvas 风格位图）+ 无头跑分 + 体积拆解
                   ui-check.js 无头浏览器里跑通整个网页版流程
-test/           验证套件（45 项，含 ui 的 HTTP 端到端）
+test/           验证套件（50 项，含 ui 的 HTTP 端到端与提交规范）
+.githooks/      commit-msg 钩子 + 提交规范校验器（install.js 由 prepare 自动跑）
+.github/        CI / Release / dependabot
 vendor/         运行时脚本（需自行下载）
 out/            产物（不进版本库）
 ```

@@ -1,18 +1,19 @@
 # Shaped after Bilup/packager's own CI, with the parts that do not exist here
 # replaced by the parts that do. What came over: the pnpm -> Node -> install ->
-# test skeleton, the `cache: pnpm` step, `concurrency` cancellation, and
-# read-only `permissions`. What did not, and why:
+# test skeleton, the `cache: pnpm` step, `concurrency` cancellation, read-only
+# `permissions`, and a deploy job that runs after the tests pass.
 #
-#   build / build-standalone-prod   there is no build step to run. The packager
-#                                   is plain CommonJS executed by node; a bundle
-#                                   would only hide the files it ships.
-#   deploy -> `web` branch          that pushes a prebuilt standalone page. The
-#                                   web UI here is a server (ui/server.js shells
-#                                   out to node:zlib to pack), so there is no
-#                                   single HTML file to publish.
+#   build / build-standalone-prod   kept in spirit, renamed: `pnpm build:site`
+#                                   assembles the static site (src/build-site.js)
+#                                   and its output is what gets deployed.
+#   deploy -> `web` branch          replaced. Bilup pushes a prebuilt page to a
+#                                   branch; the same result here is published
+#                                   through GitHub's Pages actions, which needs a
+#                                   token scope but no branch and no force-push.
 #
 # CI runs the only things here that can actually fail: the Node test suite, the
-# web UI driven in a real browser, and the shape of the commit messages.
+# web UI driven in a real browser (both as a server and as the static site), and
+# the shape of the commit messages.
 #
 # Two inputs are deliberately absent from the repository, and a fresh clone has
 # to supply them before anything can pass:
@@ -173,3 +174,65 @@ jobs:
 
       - name: Pack through the page (Windows exe resources)
         run: pnpm run ui-check --target exe
+
+      # And the same page again with no server behind it: the bundle has to pack
+      # in a Worker on its own, because that is all GitHub Pages can serve.
+      - name: Build the static site
+        run: pnpm build:site
+
+      - name: Pack through the site (no server, everything in the browser)
+        run: pnpm run ui-check --site
+
+  deploy:
+    # GitHub Pages, at https://<owner>.github.io/<repo>/. Pages must be switched
+    # to "GitHub Actions" as its source once, in repository settings; until then
+    # this job fails with the message configure-pages prints, which is clearer
+    # than anything that could be added here.
+    name: deploy the site
+    needs: [commits, test, ui-check]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # A deploy that is already publishing should finish; cancelling it midway is
+    # how a site ends up half updated.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.publish.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # The bundle embeds the runtime, so the build cannot run without it.
+      - name: Fetch the runtime scripts that are not redistributed here
+        shell: bash
+        run: |
+          curl -fsSL -o vendor/scaffolding-min.js \
+            https://packager.turbowarp.org/scaffolding/scaffolding-min.js
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the site
+        run: pnpm build:site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - name: Publish
+        id: publish
+        uses: actions/deploy-pages@v4

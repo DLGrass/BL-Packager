@@ -293,11 +293,32 @@ const main = async () => {
     // the page is still being replaced. Poll for the element itself; a single
     // DOM.querySelector here is a race that has produced a false
     // "the page did not load" before.
-    const {root} = await cdp.send('DOM.getDocument');
+    // A DOM node id belongs to one document. If the page is still finishing its
+    // first navigation between DOM.getDocument and the query -- or anything
+    // reloads it in between -- CDP answers -32000 "Could not find node with
+    // given id" and the run dies with nothing else in the output. That is a
+    // race, not a page bug: it showed up on a CI runner that attaches the
+    // debugger about nine seconds into the load, and never on the machine this
+    // was written on. So every query is re-anchored on a fresh root instead of
+    // trusting the id obtained earlier.
+    const findNode = async (selector) => {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const {root} = await cdp.send('DOM.getDocument');
+        try {
+          const found = await cdp.send('DOM.querySelector', {nodeId: root.nodeId, selector});
+          if (found.nodeId) return found.nodeId;
+        } catch (error) {
+          if (!/Could not find node with given id/.test(String((error && error.message) || error))) throw error;
+        }
+        await sleep(250);
+      }
+      return 0;
+    };
+
     let nodeId = 0;
     const inputDeadline = Date.now() + 20000;
     while (Date.now() < inputDeadline && !nodeId) {
-      ({nodeId} = await cdp.send('DOM.querySelector', {nodeId: root.nodeId, selector: '#fileInput'}));
+      nodeId = await findNode('#fileInput');
       if (!nodeId) await sleep(200);
     }
     if (!nodeId) {
@@ -362,8 +383,11 @@ const main = async () => {
     }
     console.log('page        derived switches map to maxClones/fencing/maxTextureDimension and reset');
 
-    // A real file, handed to the input the drop handler feeds.
-    await cdp.send('DOM.setFileInputFiles', {files: [sb3Path], nodeId});
+    // A real file, handed to the input the drop handler feeds. Re-resolved
+    // rather than reusing the id from above: the structural checks in between
+    // take a while, and a stale id here fails with the same unhelpful -32000.
+    const inputNode = await findNode('#fileInput') || nodeId;
+    await cdp.send('DOM.setFileInputFiles', {files: [sb3Path], nodeId: inputNode});
     await sleep(300);
 
     const readSelection = () => cdp.evaluate(`JSON.stringify({

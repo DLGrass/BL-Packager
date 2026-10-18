@@ -277,16 +277,20 @@ self.onmessage = function (event) {
       return;
     }
     if (message.kind === 'pack') {
-      const packed = self.BLPackager.pack(message.bytes, message.options);
-      // A fresh, exactly-sized buffer: the pipeline's own may be a view into a
-      // pooled allocation, and transferring that would drag the pool along.
-      const output = new Uint8Array(packed.output).buffer;
-      self.postMessage({id: message.id, ok: true, result: {
-        name: packed.name,
-        mime: packed.mime,
-        stats: packed.stats,
-        output: output
-      }}, [output]);
+      // pack() auto-resolves known extensions with a fetch, so it is a promise.
+      self.BLPackager.pack(message.bytes, message.options).then((packed) => {
+        // A fresh, exactly-sized buffer: the pipeline's own may be a view into a
+        // pooled allocation, and transferring that would drag the pool along.
+        const output = new Uint8Array(packed.output).buffer;
+        self.postMessage({id: message.id, ok: true, result: {
+          name: packed.name,
+          mime: packed.mime,
+          stats: packed.stats,
+          output: output
+        }}, [output]);
+      }).catch((error) => {
+        self.postMessage({id: message.id, ok: false, error: String((error && error.message) || error)});
+      });
       return;
     }
     throw new Error('unknown message ' + message.kind);

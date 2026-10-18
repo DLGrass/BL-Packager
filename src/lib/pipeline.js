@@ -236,6 +236,31 @@ const resolveImage = (value, label = 'image') => {
 };
 
 /**
+ * Remove extension ids from a loaded project that no source could be obtained
+ * for. The blocks that reference them stay behind and become inert; the VM no
+ * longer tries to load them from the network when the packaged page opens.
+ */
+const dropProjectExtensions = (project, ids, {onWarn = () => {}} = {}) => {
+  const data = project.projectData;
+  const drop = new Set(ids);
+  const before = data.extensions ? data.extensions.length : 0;
+  if (Array.isArray(data.extensions)) {
+    data.extensions = data.extensions.filter((id) => !drop.has(id));
+  }
+  if (data.extensionURLs) {
+    for (const id of drop) delete data.extensionURLs[id];
+  }
+  project.projectJSONBytes = Buffer.from(JSON.stringify(data), 'utf8');
+  if (project.analysis) project.analysis.extensions = Array.from(data.extensions || []);
+  if (before !== (data.extensions || []).length) {
+    for (const id of ids) {
+      onWarn(`extension "${id}" has no fetchable source; it was dropped from ` +
+        'project.json, so its blocks do nothing in the packaged project');
+    }
+  }
+};
+
+/**
  * Stage 1: parse the sb3, bake any supplied extensions in, pick the runtime,
  * build the container.
  *
@@ -244,7 +269,8 @@ const resolveImage = (value, label = 'image') => {
  * emitting a 19 MB file.
  *
  * @param {Buffer|Uint8Array} input raw sb3
- * @param {{extensions?: {name?: string, source: string}[]}} [options]
+ * @param {{extensions?: {name?: string, source: string}[],
+ *          dropExtensions?: string[]}} [options]
  * @returns {{project: object, container: Buffer, containerStats: object,
  *            scaffoldingSource: string, extensions: object}}
  */
@@ -257,10 +283,19 @@ const prepareProject = (input, options = {}) => {
     optimizePng = true,
     root = ROOT,
     extensions = [],
+    dropExtensions = [],
     onWarn = () => {}
   } = options;
 
   const project = loadSb3(input, {optimize: true, optimizePng});
+  // Extensions auto-resolve could not get a source for are dropped from
+  // project.json, so the VM never reaches for the network on them at load time
+  // (a load the offline runtime cannot answer is what makes a packaged project
+  // "not open"). Their blocks stay in the project and simply do nothing.
+  // Ids the user supplied a source for are never here — see known-extensions.js.
+  if (dropExtensions.length) {
+    dropProjectExtensions(project, dropExtensions, {onWarn});
+  }
   // Before the container is built: the rewrite lands in project.json, which is
   // what both the container and the zip target ship.
   const baked = applyBakedExtensions(project, extensions, {onWarn});

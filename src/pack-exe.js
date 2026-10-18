@@ -34,6 +34,7 @@ const {
   WINDOW_MODES
 } = require('./lib/pipeline');
 const {collectExtensions} = require('./lib/extension-source');
+const {resolveMissingExtensions} = require('./lib/known-extensions');
 
 const USAGE = `
 Usage: node src/pack-exe.js <project.sb3> [options]
@@ -51,6 +52,10 @@ Options:
                          the same page in a WebView, so it takes the same ones
       --extension <spec> bake a custom extension in (a .js path or a URL);
                          repeatable, same as in src/pack.js
+      --no-auto-extensions
+                         don't fetch extension sources at pack time (same
+                         behavior as src/pack.js: known gallery extensions and
+                         http(s) extension URLs are auto-baked by default)
       --loading-image <f>, --cursor-image <f>, --pointerlock, --gamepad, …
                          see "node src/pack.js --help"
       --preload          warm compressed assets in parallel (see README)
@@ -97,6 +102,7 @@ const parseArgs = (argv) => {
       case '--extension':
         (options.extensions = options.extensions || []).push(next());
         break;
+      case '--no-auto-extensions': options.noAutoExtensions = true; break;
       case '--loading-image': options.loadingImage = next(); break;
       case '--loading-image-mode': options.loadingImageMode = next(); break;
       case '--cursor-image': options.cursorImage = next(); break;
@@ -142,6 +148,16 @@ const run = async () => {
 
   const extensions = await collectExtensions(optionSet, options.extensions || []);
 
+  // Same auto-bake as src/pack.js: http(s) extension URLs and known gallery
+  // extensions are fetched once at pack time unless opted out.
+  const auto = (!options.noAutoExtensions && optionSet.autoExtensions !== false)
+    ? await resolveMissingExtensions(input, {onWarn: (message) => console.warn(`warning: ${message}`), provided: extensions})
+    : {sources: [], resolved: [], missing: []};
+  extensions.push(...auto.sources);
+  if (auto.missing.length) {
+    console.warn(`warning: could not auto-resolve extensions: ${auto.missing.join(', ')}`);
+  }
+
   // --- 1 + 2. HTML payload, compressed -------------------------------------
   const {pack, htmlBytes, payload, gzipped, icon, paths} = writeExeResources(input, Object.assign({}, optionSet, {
     inputPath,
@@ -152,6 +168,7 @@ const run = async () => {
     icon: resolveIcon(options.icon || optionSet.icon),
     version: options.version || optionSet.version || '',
     extensions,
+    dropExtensions: auto.missing,
     loadingImage: resolveImage(options.loadingImage || optionSet.loadingImage, 'loading image'),
     cursorCustom: resolveImage(options.cursorImage || optionSet.cursorCustom, 'cursor image'),
     gzip: !options.noGzip,

@@ -41,6 +41,7 @@ const {
   WINDOW_MODES
 } = require('../src/lib/pipeline');
 const {normalizeImageDataUri} = require('../src/lib/datauri');
+const {resolveMissingExtensions} = require('../src/lib/known-extensions');
 
 const UI_DIR = __dirname;
 const DEFAULT_PORT = 8788;
@@ -359,10 +360,22 @@ const handlePack = async (req, res, params) => {
   const target = str(params, 'target', 'html') === 'zip' ? 'zip' : 'html';
   const extensions = readExtensions(params);
 
+  // Same auto-bake as the CLIs: known gallery extensions and http(s) extension
+  // URLs are fetched once at pack time, so a project with no extension sources
+  // still packs offline-capable. The page can opt out per request with
+  // `autoExtensions=false`.
+  let dropExtensions = [];
+  if (flag(params, 'autoExtensions', true)) {
+    const auto = await resolveMissingExtensions(input, {onWarn: () => {}, provided: extensions});
+    extensions.push(...auto.sources);
+    dropExtensions = auto.missing;
+  }
+
   const common = Object.assign({
     inputPath: str(params, 'filename', ''),
     title,
     extensions,
+    dropExtensions,
     preload: flag(params, 'preload'),
     noDeflate: flag(params, 'noDeflate'),
     optimizePng: flag(params, 'optimizePng', true),
@@ -457,6 +470,17 @@ const handlePackExe = async (req, res, params, ctx) => {
   const icon = readIconParam(params);
   const extensions = readExtensions(params);
 
+  // Same auto-bake as the CLIs: known gallery extensions and http(s) extension
+  // URLs are fetched once at pack time, so a project with no extension sources
+  // still packs offline-capable. The page can opt out per request with
+  // `autoExtensions=false`.
+  let dropExtensions = [];
+  if (flag(params, 'autoExtensions', true)) {
+    const auto = await resolveMissingExtensions(input, {onWarn: () => {}, provided: extensions});
+    extensions.push(...auto.sources);
+    dropExtensions = auto.missing;
+  }
+
   const result = await serializeExe(() => {
     const started = Date.now();
     const resources = writeExeResources(input, Object.assign({
@@ -474,6 +498,7 @@ const handlePackExe = async (req, res, params, ctx) => {
       noDeflate: flag(params, 'noDeflate'),
       optimizePng: flag(params, 'optimizePng', true),
       extensions,
+      dropExtensions,
       root: ctx.buildRoot
     }, playerOptions(params)));
 

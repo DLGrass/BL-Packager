@@ -38,6 +38,7 @@ const {
   loadOptionSet
 } = require('./lib/pipeline');
 const {collectExtensions} = require('./lib/extension-source');
+const {resolveMissingExtensions} = require('./lib/known-extensions');
 
 const USAGE = `
 Usage: node src/pack.js <project.sb3> [options]
@@ -56,6 +57,12 @@ Options:
                           or an http(s) URL fetched once at pack time.
                           Repeatable. Without this, a project whose extension
                           lives on the internet cannot open offline
+      --no-auto-extensions
+                          don't fetch extension sources at pack time. By
+                          default, every extension the project references is
+                          auto-baked when it has an http(s) URL in project.json,
+                          or when its id is a known gallery extension — the
+                          packaged output is offline even if you supply nothing
       --loading-image <f> picture on the loading screen (png/jpeg/gif/webp/svg)
       --loading-image-mode <m>  normal | stretch      (default: normal)
       --cursor-image <f>  custom cursor image; implies cursor=custom
@@ -118,6 +125,7 @@ const parseArgs = (argv) => {
         // Repeatable, so a project with three custom extensions is three flags.
         (options.extensions = options.extensions || []).push(next());
         break;
+      case '--no-auto-extensions': options.noAutoExtensions = true; break;
       case '--loading-image': options.loadingImage = next(); break;
       case '--loading-image-mode': options.loadingImageMode = next(); break;
       case '--cursor-image': options.cursorImage = next(); break;
@@ -196,6 +204,16 @@ const run = async () => {
   const extensions = await collectExtensions(optionSet, options.extensions || []);
   const warn = (message) => console.warn(`warning: ${message}`);
 
+  // Fetch sources for extensions the project references without the user
+  // providing any: http(s) URLs the project itself names, and known gallery
+  // extensions referenced by bare id. The packaged output stays offline; only
+  // this pack step touches the network. Opt out with --no-auto-extensions or
+  // `"autoExtensions": false` in the option file.
+  const auto = (!options.noAutoExtensions && optionSet.autoExtensions !== false)
+    ? await resolveMissingExtensions(input, {onWarn: warn, provided: extensions})
+    : {sources: [], resolved: [], missing: []};
+  extensions.push(...auto.sources);
+
   const packOptions = {
     fullRuntime: options.fullRuntime || optionSet.fullRuntime === true,
     scaffolding: pickScaffoldingSource(options),
@@ -203,6 +221,7 @@ const run = async () => {
     deflateIndex: options.deflateIndex || optionSet.deflateIndex === true,
     optimizePng: options.noOptimizePng ? false : optionSet.optimizePng !== false,
     extensions,
+    dropExtensions: auto.missing,
     onWarn: warn
   };
 
@@ -223,7 +242,9 @@ const run = async () => {
     input: inputPath,
     target,
     options: renderOptions,
-    extensions: extensions.map((entry) => entry.name)
+    extensions: extensions.map((entry) => entry.name),
+    autoResolved: auto.resolved,
+    missingExtensions: auto.missing
   };
 
   // --- zip: a folder-shaped package for a static host ---------------------
@@ -255,6 +276,8 @@ const run = async () => {
     console.log(`project      ${a.targetCount} targets, ${a.assetCount} assets (${human(a.assetBytes)})`);
     console.log(`runtime      ${path.basename(zipped.scaffoldingSource)}`);
     if (extensions.length) console.log(`extensions   ${extensions.map((e) => e.name).join(', ')}`);
+    if (auto.resolved.length) console.log(`extension~   auto-baked ${auto.resolved.map((e) => e.id).join(', ')}`);
+    if (auto.missing.length) console.log(`extension!   could not auto-resolve: ${auto.missing.join(', ')}`);
     console.log(`layout       index.html ${human(zipped.html.length)} + project.json + ${a.assetCount} assets`);
     console.log(`->[zip]      ${outPath}  (${human(zipped.zip.length)}, ${zipped.entries.length} entries)`);
     console.log('             serve the extracted folder over http(s); file:// cannot fetch assets');
@@ -324,6 +347,13 @@ const run = async () => {
   for (const baked of (a.bakedExtensions || [])) {
     console.log(`extension    ${baked.name} -> ${baked.id || '(eager)'} [${baked.how}] ` +
       `${human(baked.bytes)} -> ${human(baked.uriBytes)} in the page`);
+  }
+  for (const {id, url} of auto.resolved) {
+    console.log(`extension~   auto-baked ${id} <- ${url}`);
+  }
+  if (auto.missing.length) {
+    console.log(`extension!   could not auto-resolve: ${auto.missing.join(', ')} ` +
+      '(pass each source with --extension)');
   }
   if ((a.remoteExtensions || []).length) {
     console.log(`extension!   still remote: ${a.remoteExtensions.join(', ')}`);

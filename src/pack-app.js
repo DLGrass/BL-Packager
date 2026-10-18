@@ -38,6 +38,7 @@ const {
   resolveAppIcon
 } = require('./lib/apps');
 const {collectExtensions} = require('./lib/extension-source');
+const {resolveMissingExtensions} = require('./lib/known-extensions');
 
 const USAGE = `
 Usage: node src/pack-app.js <project.sb3> --target <macos|linux|android|all> [options]
@@ -65,6 +66,10 @@ Options:
                          {targets, assets, canvas, ms} there and exits
       --options <spec>   JSON of the runtime/player options, or @file.json
       --extension <spec> bake a custom extension in (a .js path or a URL); repeatable
+      --no-auto-extensions
+                         don't fetch extension sources at pack time (same
+                         behavior as src/pack.js: known gallery extensions and
+                         http(s) extension URLs are auto-baked by default)
       --loading-image <f>, --cursor-image <f>, --pointerlock, --gamepad, …
                          see "node src/pack.js --help"
       --preload          warm compressed assets in parallel (see README)
@@ -110,6 +115,7 @@ const parseArgs = (argv) => {
       case '--extension':
         (options.extensions = options.extensions || []).push(next());
         break;
+      case '--no-auto-extensions': options.noAutoExtensions = true; break;
       case '--loading-image': options.loadingImage = next(); break;
       case '--loading-image-mode': options.loadingImageMode = next(); break;
       case '--cursor-image': options.cursorImage = next(); break;
@@ -177,6 +183,16 @@ const run = async () => {
 
   const extensions = await collectExtensions(optionSet, options.extensions || []);
 
+  // Same auto-bake as src/pack.js: http(s) extension URLs and known gallery
+  // extensions are fetched once at pack time unless opted out.
+  const auto = (!options.noAutoExtensions && optionSet.autoExtensions !== false)
+    ? await resolveMissingExtensions(input, {onWarn: (message) => console.warn(`warning: ${message}`), provided: extensions})
+    : {sources: [], resolved: [], missing: []};
+  extensions.push(...auto.sources);
+  if (auto.missing.length) {
+    console.warn(`warning: could not auto-resolve extensions: ${auto.missing.join(', ')}`);
+  }
+
   const resolved = writeAppResources(input, Object.assign({}, optionSet, {
     target,
     inputPath,
@@ -190,6 +206,7 @@ const run = async () => {
     orientation,
     icon: resolveAppIcon(options.icon || optionSet.icon),
     extensions,
+    dropExtensions: auto.missing,
     loadingImage: resolveImage(options.loadingImage || optionSet.loadingImage, 'loading image'),
     cursorCustom: resolveImage(options.cursorImage || optionSet.cursorCustom, 'cursor image'),
     gzip: !options.noGzip,

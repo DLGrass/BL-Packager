@@ -512,6 +512,40 @@ URL 只抓一次、只抓你指名的那个，产物里不含它（产物的 `co
 `--json` / 界面报表里会写明每个扩展 `bytes → uriBytes`。一个 100 KB 的扩展通常
 让产物大 150–180 KB，换来的是**离线可用**。
 
+#### 自动解析：不提供源码也能离线打包
+
+上面那条路要求用户给源码。还有一类作品**连 URL 都没有**：TurboWarp / Bilup 等
+编辑器把一批画廊扩展注册成编辑器内置（`project.json` 里只有 `extensions` 数组，
+`extensionURLs` 是空的），导出 sb3 时不会留下任何取源码的线索。对这种作品，
+`--extension` 无从下手——但代码总得从某处来，所以打包器做了一件事（`src/lib/known-extensions.js`）：
+
+- 维护一张 **id → 权威源 URL** 的注册表（每个条目都验证过源码里声明的 id 与键名
+  一致；两个编辑器画廊的 `generated-metadata/extensions-v0.json` 是同一个检查的数据源）；
+- 打包时把「作品声明了、但既没有 URL 也不是 Scratch 内置」的扩展 id 对照注册表，
+  **自动抓取一次源码**，走上面 4.4 的同一套烘进流程；
+- `extensionURLs` 里指向 http(s) 的条目同样**自动按作品自己的 URL 抓一次**（作品的
+  版本钉住优先于注册表）；
+- 抓不到或注册表没有 → 维持原来的 warn，**不影响打包成功**。
+
+打包这一步需要联网（和 `--extension <URL>` 一致），**产物依旧完全离线**。
+静态站点/网页版同样生效（两个画廊都回 `Access-Control-Allow-Origin: *`）。
+不想联网时：CLI 加 `--no-auto-extensions`，网页请求带 `autoExtensions=false`，
+选项文件写 `"autoExtensions": false`。
+
+```bash
+node src/pack.js x.sb3          # 已知扩展自动烘进；抓不到的照旧 warn
+node src/pack.js x.sb3 --no-auto-extensions   # 完全离线打包
+```
+
+CLI 会把每一条自动烘进的扩展打成一行为 `extension~   auto-baked <id> <- <url>`，
+`--json` 的 `autoResolved` / `missingExtensions` 两个字段记录同样的信息。
+作品里用了注册表之外的私有扩展时（比如本项目调查过的 `screenFXToolbox`，任何公开
+画廊都没有），它会出现在 `missingExtensions` 里，并且**从 `project.json` 的
+`extensions` 数组里摘掉**——这样 VM 打开产物时不会为它去访问网络（那正是「打不开」
+的原因），它那些积木留在作品里、静默不生效，其余全部正常。想补全就把它加进注册表
+或 `--extension` 提供源码。这个摘除只发生在「自动解析也没拿到源码」的扩展上；
+用户提供了源码、或 `--no-auto-extensions` 关掉自动解析时，行为和原来完全一致。
+
 ---
 
 ### 4.5 ZIP 目标：给静态托管用的形态

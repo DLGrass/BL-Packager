@@ -9,6 +9,8 @@
 // pipeline.pickRenderOptions so the "which keys reach the renderer" list is still
 // written in one place.
 
+const {resolveMissingExtensions} = require('../lib/known-extensions');
+
 const safeFileName = (name) =>
   String(name).replace(/[\\/:*?"<>|\r\n]+/g, '_').replace(/^\.+/, '').trim() || 'project';
 
@@ -50,18 +52,30 @@ const createClient = (deps) => {
    * Returns the bytes and their MIME type rather than an html string, because
    * there are now two shapes of output: a page, and a zip that has to be served.
    */
-  const pack = (bytes, options = {}) => {
+  const pack = async (bytes, options = {}) => {
     const started = Date.now();
     const title = options.title || '';
     const target = options.target === 'zip' ? 'zip' : 'html';
     const mode = options.mode === 'tw' ? 'tw' : 'fast';
-    const extensions = Array.isArray(options.extensions) ? options.extensions : [];
+    const extensions = Array.isArray(options.extensions) ? options.extensions.slice() : [];
+
+    // Same auto-bake as the CLIs: known gallery extensions and http(s)
+    // extension URLs are fetched once at pack time (the galleries send
+    // Access-Control-Allow-Origin: *). Opt out with `autoExtensions: false`.
+    let dropExtensions = [];
+    if (options.autoExtensions !== false) {
+      const auto = await resolveMissingExtensions(bytes, {onWarn: () => {}, provided: extensions});
+      extensions.push(...auto.sources);
+      dropExtensions = auto.missing;
+    }
+
     const resolvedTitle = safeFileName(title || pipeline.defaultTitle(options.filename || ''));
 
     const common = Object.assign({
       inputPath: options.filename || '',
       title,
       extensions,
+      dropExtensions,
       preload: !!options.preload,
       noDeflate: !!options.noDeflate,
       optimizePng: options.optimizePng !== false,

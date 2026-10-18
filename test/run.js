@@ -26,6 +26,10 @@ const {
 } = require('../src/lib/deflate');
 const {Buffer: ShimBuffer} = require('../src/lib/bytes');
 const {createHash: md5CreateHash} = require('../src/lib/md5');
+const {imageDataUri, sniffImage, parseDataUri, normalizeImageDataUri, isIconDataUri} =
+  require('../src/lib/datauri');
+const {bakeExtensions, applyBakedExtensions, encodeExtension, wrapExtensionSource} =
+  require('../src/lib/extensions');
 
 const ROOT = path.join(__dirname, '..');
 const REF = path.join(ROOT, '..', '_ref', 'turbowarp-packager');
@@ -561,6 +565,206 @@ const main = async () => {
   });
 
   // -------------------------------------------------------------------------
+  section('[extensions: baking a source into the page]');
+  // -------------------------------------------------------------------------
+  // The scenario is the one that makes a packaged project fail offline: its
+  // project.json points at a URL on the internet. Baking replaces that with the
+  // source, wrapped the way upstream wraps it.
+  {
+    const SOURCE = [
+      'class T { getInfo () { return {id: "blTest", name: "T", blocks: []}; } }',
+      'Scratch.extensions.register(new T());'
+    ].join('\n');
+
+    /** Decode a data: URL the way a browser would and run it with a stub Scratch. */
+    const runBaked = (uri) => {
+      assert.match(uri, /^data:text\/javascript/, 'not a javascript data: URL');
+      const comma = uri.indexOf(',');
+      const meta = uri.slice(0, comma);
+      const payload = uri.slice(comma + 1);
+      const text = /;base64$/.test(meta)
+        ? Buffer.from(payload, 'base64').toString('utf8')
+        : decodeURIComponent(payload);
+      const registered = [];
+      const Scratch = {extensions: {register: (extension) => registered.push(extension)}};
+      new Function('Scratch', text)(Scratch);
+      return registered;
+    };
+
+    await test('the baked source decodes back to working JavaScript', () => {
+      const registered = runBaked(encodeExtension(SOURCE));
+      assert.strictEqual(registered.length, 1, 'the extension did not register');
+      assert.strictEqual(registered[0].getInfo().id, 'blTest');
+    });
+
+    await test('the wrapper matches upstream, so sandbox-style sources still work', () => {
+      const wrapped = wrapExtensionSource('BODY');
+      assert.ok(wrapped.startsWith('(function(Scratch) {'));
+      assert.ok(wrapped.endsWith('})(Scratch);'));
+      // The payload must survive being dropped into an HTML attribute or a
+      // <script> body: no quotes, no angle brackets, no ampersand.
+      const uri = encodeExtension(SOURCE);
+      assert.ok(!/[<>"']/.test(uri.replace(/^data:[^,]*,/, '')), 'unsafe character in the data URL');
+    });
+
+    await test('an id the source declares and the project needs is matched', () => {
+      const project = {
+        projectData: {
+          extensions: ['blTest'],
+          extensionURLs: {blTest: 'https://extensions.turbowarp.org/blTest.js'}
+        }
+      };
+      const baked = bakeExtensions(project, [{name: 'whatever.js', source: SOURCE}]);
+      assert.strictEqual(baked.report.length, 1);
+      assert.strictEqual(baked.report[0].id, 'blTest');
+      assert.strictEqual(baked.report[0].how, 'declares');
+      assert.match(baked.urls.blTest, /^data:text\/javascript/);
+      assert.deepStrictEqual(baked.remote, [], 'nothing should still need a network');
+      // Scaffolding only loads the ids its blocks use, so an unused extension has
+      // to be registered explicitly as well — see bakeExtensions().
+      assert.strictEqual(baked.eager.length, 1, 'the source must also be loaded eagerly');
+    });
+
+    await test('a filename that matches the id is accepted when the source is opaque', () => {
+      const project = {projectData: {extensionURLs: {myExt: 'https://x/myExt.js'}}};
+      const baked = bakeExtensions(project, [{name: 'myExt.js', source: '/* no id in here */'}]);
+      assert.strictEqual(baked.report[0].how, 'filename');
+      assert.strictEqual(baked.report[0].id, 'myExt');
+      assert.match(baked.urls.myExt, /^data:/);
+    });
+
+    await test('one opaque file and one unfilled id are paired, and only then', () => {
+      const one = bakeExtensions(
+        {projectData: {extensionURLs: {solo: 'https://x/solo.js'}}},
+        [{name: 'mystery.js', source: '/* nothing */'}]);
+      assert.strictEqual(one.report[0].how, 'only-one-left');
+      assert.match(one.urls.solo, /^data:/);
+
+      // Two candidates is ambiguous: guessing there would silently wire the wrong
+      // extension into the wrong id.
+      const two = bakeExtensions(
+        {projectData: {extensionURLs: {a: 'https://x/a.js', b: 'https://x/b.js'}}},
+        [{name: 'mystery.js', source: '/* nothing */'}]);
+      assert.strictEqual(two.report[0].how, 'eager');
+      assert.deepStrictEqual(two.remote.slice().sort(), ['a', 'b']);
+    });
+
+    await test('a source that matches nothing is loaded eagerly and the remote URL survives', () => {
+      const warnings = [];
+      const baked = bakeExtensions(
+        {projectData: {extensionURLs: {aaa: 'https://x/aaa.js', bbb: 'https://x/bbb.js'}}},
+        [{name: 'extra.js', source: '/* unrelated */'}],
+        {onWarn: (message) => warnings.push(message)});
+      assert.strictEqual(baked.report[0].how, 'eager');
+      assert.strictEqual(baked.report[0].id, null);
+      assert.strictEqual(baked.eager.length, 1);
+      assert.strictEqual(baked.urls.aaa, 'https://x/aaa.js', 'a remote URL must not be invented over');
+      assert.ok(warnings.some((w) => w.includes('needs a network')), warnings.join(' | '));
+    });
+
+    await test('an empty source is refused instead of baking a broken extension', () => {
+      const warnings = [];
+      const baked = bakeExtensions({projectData: {}}, [{name: 'empty.js', source: '   '}],
+        {onWarn: (message) => warnings.push(message)});
+      assert.strictEqual(baked.report.length, 0);
+      assert.strictEqual(baked.eager.length, 0);
+      assert.ok(warnings.some((w) => w.includes('no source')), warnings.join(' | '));
+    });
+
+    await test('applyBakedExtensions rewrites project.json and keeps its byte count honest', () => {
+      const project = {
+        projectData: {targets: [], extensions: ['blTest'], extensionURLs: {blTest: 'https://x/blTest.js'}},
+        projectJSONBytes: Buffer.from('{}'),
+        analysis: {projectJSONBytes: 2}
+      };
+      const result = applyBakedExtensions(project, [{name: 'blTest.js', source: SOURCE}]);
+      const written = JSON.parse(project.projectJSONBytes.toString('utf8'));
+      assert.match(written.extensionURLs.blTest, /^data:text\/javascript/);
+      assert.strictEqual(project.analysis.projectJSONBytes, project.projectJSONBytes.length,
+        'analysis must not describe the old byte count');
+      assert.strictEqual(project.analysis.bakedExtensions.length, 1);
+      assert.deepStrictEqual(project.analysis.remoteExtensions, []);
+      assert.strictEqual(result.eager.length, 1);
+    });
+
+    await test('a project with no extensions is left completely alone', () => {
+      const project = {projectData: {targets: []}, projectJSONBytes: Buffer.from('{"a":1}'),
+        analysis: {projectJSONBytes: 7}};
+      const before = project.projectJSONBytes;
+      const result = applyBakedExtensions(project, []);
+      assert.strictEqual(project.projectJSONBytes, before, 'project.json must not be re-serialised');
+      assert.strictEqual(project.projectData.extensionURLs, undefined);
+      assert.deepStrictEqual(result.report, []);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  section('[datauri: the two images a page can carry]');
+  // -------------------------------------------------------------------------
+  {
+    const png = Buffer.from(
+      '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a4c00000000049454e44ae426082',
+      'hex');
+    const ico = Buffer.from([0, 0, 1, 0, 1, 0, 16, 16, 0, 0, 1, 0, 32, 0, 4, 0, 0, 0, 22, 0, 0, 0]);
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"></svg>');
+
+    await test('images are identified by content, not by name', () => {
+      assert.strictEqual(sniffImage(png), 'png');
+      assert.strictEqual(sniffImage(ico), 'ico');
+      assert.strictEqual(sniffImage(svg), 'svg');
+      assert.strictEqual(sniffImage(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0])), 'jpeg');
+      assert.strictEqual(sniffImage(Buffer.from('GIF89a-whatever')), 'gif');
+      assert.strictEqual(sniffImage(Buffer.from('this is a text file')), null);
+      assert.strictEqual(sniffImage(Buffer.alloc(4)), null, 'a truncated file must not be guessed');
+    });
+
+    await test('the data URL round trips and is rebuilt as base64', () => {
+      const uri = imageDataUri(png, 'a.png');
+      assert.match(uri, /^data:image\/png;base64,/);
+      const parsed = parseDataUri(uri);
+      assert.ok(parsed.bytes.equals(png));
+      assert.strictEqual(parsed.mime, 'image/png');
+    });
+
+    await test('a percent-encoded payload cannot smuggle quotes into the page', () => {
+      // What a hostile (or merely sloppy) front end could send.
+      const hostile = `data:image/svg+xml,${encodeURIComponent('<svg onload="alert(1)"></svg>')}`;
+      const normalised = normalizeImageDataUri(hostile, {name: 'cursor'});
+      assert.match(normalised, /^data:image\/svg\+xml;base64,/);
+      assert.ok(!/[<>"']/.test(normalised), 'the re-encoded URL must be inert inside HTML/CSS');
+    });
+
+    await test('non-images, empty values and oversized files are refused', () => {
+      assert.strictEqual(normalizeImageDataUri(''), '');
+      assert.strictEqual(normalizeImageDataUri(null), '');
+      assert.throws(() => normalizeImageDataUri(`data:text/plain,${encodeURIComponent('hello')}`),
+        /not an image/);
+      assert.throws(() => imageDataUri(Buffer.from('definitely not an image'), 'logo'),
+        /not an image this packager recognises/);
+      assert.throws(
+        () => normalizeImageDataUri(imageDataUri(png, 'big'), {maxBytes: 10, name: 'big'}),
+        /limit is 10/);
+    });
+
+    await test('only a real .ico counts as an icon', () => {
+      assert.strictEqual(isIconDataUri(imageDataUri(ico, 'app.ico')), true);
+      assert.strictEqual(isIconDataUri(imageDataUri(png, 'app.png')), false,
+        'a PNG renamed to .ico must not be accepted: rc.exe cannot compile it');
+      assert.strictEqual(isIconDataUri('not a uri'), false);
+    });
+
+    await test('the exe icon accepts both a path and the data URL an export writes', () => {
+      const {resolveIcon} = require('../src/lib/pipeline');
+      assert.strictEqual(resolveIcon(null), null);
+      const icon = resolveIcon(imageDataUri(ico, 'app.ico'));
+      assert.strictEqual(icon.name, 'app.ico');
+      assert.ok(icon.bytes.equals(ico));
+      assert.throws(() => resolveIcon(imageDataUri(png, 'app.png')), /\.ico/);
+      assert.throws(() => resolveIcon('data:text/plain,hello'), /not a valid data: URL|\.ico/);
+    });
+  }
+
+  // -------------------------------------------------------------------------
   section('[html: every option reaches the page, or is refused]');
   // -------------------------------------------------------------------------
   // The UI, the two CLIs and the exe payload all funnel into renderHtml(), so an
@@ -595,6 +799,8 @@ const main = async () => {
 
     const project = loadSb3(sb3, {optimizePng: false, fullRuntime: false});
     const scaffoldingSource = path.join(ROOT, 'vendor', 'scaffolding-min.js');
+    // A 1x1 PNG, standing in for whatever the user picked in the file dialog.
+    const IMAGE_URI = imageDataUri(png, 'test.png');
     // mode 'tw' keeps the payload the original sb3, so these assertions are about
     // the options and nothing else.
     const render = (options) => renderHtml(project, sb3,
@@ -633,7 +839,11 @@ const main = async () => {
       ['maxTextureDimension', {maxTextureDimension: 4096}, /setMaxTextureDimension\(4096\)/],
       ['closeWhenStopped', {closeWhenStopped: true}, /vm\.runtime\.on\('PROJECT_RUN_STOP'/],
       ['cloudMode local', {cloudMode: 'local', projectId: 'bl-probe'},
-        /new Scaffolding\.Cloud\.LocalStorageProvider\("cloudvariables:bl-probe"\)/]
+        /new Scaffolding\.Cloud\.LocalStorageProvider\("cloudvariables:bl-probe"\)/],
+      ['loadingImage stretch', {loadingImage: IMAGE_URI, loadingImageMode: 'stretch'},
+        /#loading \{\s*background-image: url\("data:image\/png;base64,/],
+      ['cursor image', {cursorCustom: IMAGE_URI, cursorCenterX: 4, cursorCenterY: 8},
+        /\.sc-canvas \{ cursor: url\("data:image\/png;base64,[^"]+"\) 4 8, auto; \}/]
     ];
 
     await test('each option turns into the scaffolding call upstream emits', () => {
@@ -643,6 +853,42 @@ const main = async () => {
         if (!needle.test(html)) stale.push(name);
       }
       assert.deepStrictEqual(stale, [], `options with no effect: ${stale.join(', ')}`);
+    });
+
+    await test('a loading image in normal mode becomes an <img>, not a background', () => {
+      const html = render({loadingImage: IMAGE_URI});
+      assert.match(html, /class="loading-image"><img alt="" src="data:image\/png;base64,/);
+      assert.ok(!html.includes('background-image: url("data:image/png'), 'normal mode must not stretch it');
+    });
+
+    await test('an image that is not a data: URL is ignored instead of rendered broken', () => {
+      assert.strictEqual(normalizeOptions({loadingImage: 'logo.png'}).loadingImage, '');
+      assert.strictEqual(normalizeOptions({cursorCustom: 'cursor.png'}).cursor, 'auto');
+      const html = render({loadingImage: 'logo.png', cursorCustom: 'http://example.com/c.png'});
+      assert.ok(!html.includes('logo.png'));
+      assert.ok(!html.includes('example.com'));
+    });
+
+    await test('the addon bundle is inlined only when an addon is asked for', () => {
+      const addonsPath = path.join(ROOT, 'vendor', 'scaffolding-addons.js');
+      assert.ok(fs.existsSync(addonsPath),
+        `${addonsPath} is missing: the pointer-lock/gamepad/cloud-behaviour options cannot be verified`);
+
+      assert.ok(!render({}).includes('ScaffoldingAddons'), 'the bundle leaked into a plain build');
+
+      const html = renderHtml(project, sb3, {
+        mode: 'tw',
+        scaffoldingSource,
+        addonsSource: addonsPath,
+        pointerlock: true,
+        gamepad: true,
+        specialCloudBehaviors: true,
+        unsafeCloudBehaviors: true,
+        controlPause: true
+      }).html.toString('utf8');
+      assert.match(html, /window\.ScaffoldingAddons=\{run:/, 'the bundle itself must be inline');
+      assert.match(html,
+        /ScaffoldingAddons\.run\(scaffolding, \{"pointerlock":true,"gamepad":true,"specialCloudBehaviors":true,"unsafeCloudBehaviors":true,"pause":true\}\)/);
     });
 
     await test('the two switches that are the absence of a call really are absent', () => {
@@ -705,6 +951,345 @@ const main = async () => {
   }
 
   // -------------------------------------------------------------------------
+  section('[zip target: index.html with assets/ next to it]');
+  // -------------------------------------------------------------------------
+  // The one target where inlining is the wrong answer: the browser fetches the
+  // assets itself, in parallel, and caches them. Everything here runs in Node,
+  // including the loader path, because createProjectSource's http mode only
+  // needs a `fetch`-shaped function.
+  {
+    const {packToZip} = require('../src/lib/pipeline');
+    const {createProjectSource} = require('../src/runtime/loader');
+
+    const png = encodePng(16, 16, canvasRows(16, 16), {filter: 0, level: 6});
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">' +
+      '<rect width="8" height="8"/></svg>');
+    const pngName = `${md5(png)}.png`;
+    const svgName = `${md5(svg)}.svg`;
+    const sb3 = writeZip([
+      {
+        name: 'project.json',
+        data: Buffer.from(JSON.stringify({
+          targets: [{
+            isStage: true, name: 'Stage', variables: {}, lists: {}, broadcasts: {}, blocks: {},
+            comments: {}, sounds: [], volume: 100, layerOrder: 0,
+            costumes: [{assetId: pngName.replace(/\.png$/, ''), name: 'c', md5ext: pngName,
+              dataFormat: 'png', rotationCenterX: 0, rotationCenterY: 0}]
+          }],
+          monitors: [],
+          extensions: ['blTest'],
+          extensionURLs: {blTest: 'https://extensions.turbowarp.org/blTest.js'},
+          meta: {semver: '3.0.0', vm: '0.0.0'}
+        }), 'utf8')
+      },
+      {name: pngName, data: png},
+      {name: svgName, data: svg}
+    ]);
+
+    const extensionSource = 'Scratch.extensions.register({getInfo: () => ({id: "blTest", name: "T", blocks: []})});';
+    const options = {
+      inputPath: 'site.sb3',
+      title: 'Site',
+      optimizePng: false,
+      extensions: [{name: 'blTest.js', source: extensionSource}]
+    };
+    const packed = packToZip(sb3, options);
+    const entries = readZip(packed.zip);
+    const html = entries.get('index.html').data.toString('utf8');
+    const projectJSON = JSON.parse(entries.get('project.json').data.toString('utf8'));
+
+    await test('the archive is index.html + project.json + one file per asset', () => {
+      assert.deepStrictEqual([...entries.keys()].sort(),
+        ['assets/' + pngName, 'assets/' + svgName, 'index.html', 'project.json'].sort());
+    });
+
+    await test('index.html carries no payload at all', () => {
+      assert.ok(!/<script data=/.test(html), 'the base85 chunks must be gone');
+      assert.ok(!html.includes('decodeChunk'), 'the decoder must not be inlined');
+      // loader.js mentions both by name (it has a fallback path for each), so the
+      // needles have to be strings only the implementations contain.
+      assert.ok(!html.includes('BLPK: bad magic'), 'the container reader must not be inlined');
+      assert.ok(!html.includes('inflate: invalid huffman code'),
+        'the pure-JS inflater must not be inlined — nothing here decompresses');
+      assert.match(html, /mode: "http"/);
+      assert.match(html, /assetBase: "assets\/"/);
+      // The runtime is still there: this is the same page, not a different one.
+      assert.ok(html.length > 1000000, `index.html is suspiciously small: ${html.length}`);
+    });
+
+    await test('extension baking survives into project.json', () => {
+      assert.match(projectJSON.extensionURLs.blTest, /^data:text\/javascript/);
+    });
+
+    await test('the assets are byte-identical to the project', () => {
+      assert.ok(entries.get('assets/' + pngName).data.equals(png));
+      assert.ok(entries.get('assets/' + svgName).data.equals(svg));
+    });
+
+    await test('packing twice produces the same bytes', () => {
+      const again = packToZip(sb3, options);
+      assert.ok(again.zip.equals(packed.zip), 'the zip target must be byte-deterministic');
+    });
+
+    // --- the loader, driven through a fetch-shaped stub ---------------------
+    const makeStub = () => {
+      const stored = new Map();
+      const storage = {
+        addHelper: (helper) => { storage.helper = helper; },
+        createAsset: (assetType, dataFormat, data, assetId) => {
+          stored.set(`${assetId}.${dataFormat}`, Buffer.from(data));
+          return {assetType, dataFormat, assetId};
+        }
+      };
+      return {storage, vm: {runtime: {on: () => {}}}, stored};
+    };
+
+    const fakeFetch = (files) => async (path) => {
+      if (!files.has(path)) return {ok: false, status: 404};
+      const data = files.get(path);
+      return {
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => data.buffer.slice(data.byteOffset, data.byteOffset + data.length)
+      };
+    };
+
+    const fileTable = new Map();
+    for (const [name, entry] of entries) fileTable.set(name, entry.data);
+
+    await test('the http loader fetches project.json and every asset', async () => {
+      const stub = makeStub();
+      const source = createProjectSource({
+        mode: 'http', storage: stub.storage, vm: stub.vm, fetch: fakeFetch(fileTable)
+      });
+      const bytes = Buffer.from(await source.getProjectData());
+      assert.ok(bytes.equals(entries.get('project.json').data));
+      assert.strictEqual(source.stats().mode, 'http');
+
+      for (const key of [pngName, svgName]) {
+        const dot = key.lastIndexOf('.');
+        await stub.storage.helper.load('ImageVector', key.slice(0, dot), key.slice(dot + 1));
+        assert.ok(stub.stored.get(key).equals(fileTable.get('assets/' + key)), `asset ${key} differs`);
+      }
+      assert.strictEqual(source.assetLoads(), 2);
+      assert.strictEqual(source.warmUp(), null, 'there is nothing to warm up');
+    });
+
+    await test('a missing asset is null, a missing project.json is an explanation', async () => {
+      const stub = makeStub();
+      const source = createProjectSource({
+        mode: 'http', storage: stub.storage, vm: stub.vm, fetch: fakeFetch(fileTable)
+      });
+      assert.strictEqual(await stub.storage.helper.load('ImageVector', '0'.repeat(32), 'png'), null);
+
+      const broken = createProjectSource({
+        mode: 'http', storage: stub.storage, vm: stub.vm, fetch: fakeFetch(new Map())
+      });
+      await assert.rejects(broken.getProjectData(), /has to be served over http/);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  section('[app targets: macOS / Linux / Android]');
+  // -------------------------------------------------------------------------
+  // These three targets share one payload with the HTML packager, so the only
+  // things worth asserting are the parts that differ: the per-target resource
+  // layout, the metadata the hosts parse, and the escaping in the generated
+  // plist / manifest / desktop files — the last of which is where a title like
+  // `Tom & Jerry's` stops being cosmetic and starts being a build failure.
+  {
+    const os = require('node:os');
+    const apps = require('../src/lib/apps');
+    const {packToHtml} = require('../src/lib/pipeline');
+
+    const png = encodePng(16, 16, canvasRows(16, 16), {filter: 0, level: 6});
+    const pngName = `${md5(png)}.png`;
+    const sb3 = writeZip([
+      {
+        name: 'project.json',
+        data: Buffer.from(JSON.stringify({
+          targets: [{
+            isStage: true, name: 'Stage', variables: {}, lists: {}, broadcasts: {},
+            blocks: {}, comments: [], sounds: [],
+            costumes: [{assetId: pngName.replace(/\.png$/, ''), name: 'backdrop1',
+              md5ext: pngName, dataFormat: 'png', rotationCenterX: 0, rotationCenterY: 0}],
+            volume: 100, layerOrder: 0, tempo: 60, videoTransparency: 50, videoState: 'off'
+          }],
+          monitors: [], extensions: [], meta: {semver: '3.0.0', vm: '0.0.0'}
+        }), 'utf8')
+      },
+      {name: pngName, data: png}
+    ]);
+
+    // A scratch root: these tests must not overwrite the real hosts/*/build,
+    // which is whatever the last manual pack left behind.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bl-packager-apps-'));
+    fs.mkdirSync(path.join(root, 'vendor'), {recursive: true});
+    fs.copyFileSync(path.join(ROOT, 'vendor', 'scaffolding-min.js'),
+      path.join(root, 'vendor', 'scaffolding-min.js'));
+
+    const TITLE = 'Tom & Jerry\'s <测试>';
+    const common = {
+      target: 'all',
+      inputPath: 'demo.sb3',
+      title: TITLE,
+      id: 'com.example.game',
+      version: '2.5.1',
+      root
+    };
+
+    const written = apps.writeAppResources(sb3, common);
+    const html = packToHtml(sb3, {
+      mode: 'fast', inputPath: 'demo.sb3', title: TITLE, root
+    }).html;
+
+    await test('one render, three targets, one identical payload', () => {
+      assert.deepStrictEqual(Object.keys(written.targets).sort(), ['android', 'linux', 'macos']);
+      const macos = fs.readFileSync(written.targets.macos.paths.html);
+      const linux = fs.readFileSync(written.targets.linux.paths.html);
+      const android = fs.readFileSync(path.join(written.targets.android.paths.assets, 'app.html.gz'));
+      assert.ok(macos.equals(linux), 'macOS and Linux payloads differ');
+      assert.ok(macos.equals(android), 'the APK assets differ from the bundle payload');
+      // gzip, not the raw page: this is the file the host inflates.
+      assert.ok(zlib.gunzipSync(macos).equals(html), 'payload is not gzip(packed html)');
+      assert.ok(macos.length < html.length);
+    });
+
+    await test('app.meta carries the identity the hosts read', () => {
+      const meta = fs.readFileSync(written.targets.macos.paths.meta, 'utf8');
+      const fields = new Map(meta.trim().split('\n').map((line) => {
+        const at = line.indexOf('=');
+        return [line.slice(0, at), line.slice(at + 1)];
+      }));
+      assert.strictEqual(fields.get('title'), TITLE);
+      assert.strictEqual(fields.get('id'), 'com.example.game');
+      assert.strictEqual(fields.get('version'), '2.5.1');
+      // `<`/`>` are illegal in a file name on every one of the three, so they
+      // become spaces; the *title* keeps them, and that is what the window,
+      // the Finder label and the Android label show.
+      assert.strictEqual(fields.get('name'), "Tom & Jerry's 测试");
+      assert.strictEqual(fields.get('gzip'), '1');
+      assert.strictEqual(fields.get('target'), 'macos,linux,android');
+      // Defaults are omitted so a rebuild keeps the exact bytes.
+      assert.ok(!fields.has('window'), 'window=window should not be written');
+    });
+
+    await test('the plist is XML-escaped and UTF-8 clean', () => {
+      const plist = fs.readFileSync(written.targets.macos.paths.plist, 'utf8');
+      assert.match(plist, /<key>CFBundleIdentifier<\/key>\s*<string>com\.example\.game<\/string>/);
+      assert.match(plist, /<key>CFBundleShortVersionString<\/key>\s*<string>2\.5\.1<\/string>/);
+      // The title survives as UTF-8 (a plist is XML), which the exe's app.rc
+      // cannot do — that file is parsed in the OEM code page.
+      assert.ok(plist.includes('Tom &amp; Jerry&apos;s &lt;测试&gt;'), 'title was not escaped');
+      assert.match(plist, /<key>NSAllowsLocalNetworking<\/key>\s*<true\/>/);
+      // No stray '&' that would make the plist unparseable.
+      assert.ok(!/&(?!(amp|lt|gt|quot|apos);)/.test(plist), 'unescaped ampersand');
+    });
+
+    await test('the AndroidManifest names the fixed host class and a numeric versionCode', () => {
+      const manifest = fs.readFileSync(written.targets.android.paths.manifest, 'utf8');
+      assert.match(manifest, /package="com\.example\.game"/);
+      assert.match(manifest, /android:versionName="2\.5\.1"/);
+      assert.match(manifest, /android:versionCode="2005001"/);
+      assert.match(manifest, /android:name="dev\.bilup\.player\.MainActivity"/);
+      assert.match(manifest, /android:usesCleartextTraffic="true"/);
+      assert.match(manifest, /android:screenOrientation="sensorLandscape"/);
+      // The APK's assets are what AssetManager.open() sees.
+      const assets = written.targets.android.paths.assets;
+      assert.ok(fs.existsSync(path.join(assets, 'app.meta')));
+      assert.strictEqual(fs.readFileSync(path.join(assets, 'app.meta'), 'utf8'),
+        fs.readFileSync(written.targets.android.paths.meta, 'utf8'));
+    });
+
+    await test('a title with an apostrophe does not break aapt2', () => {
+      const strings = fs.readFileSync(
+        path.join(written.targets.android.dir, 'res', 'values', 'strings.xml'), 'utf8');
+      // aapt2 rejects a bare ' inside <string>; XML does not need it escaped, so
+      // it has to be the Android escape.
+      assert.ok(strings.includes("Tom &amp; Jerry\\'s &lt;测试&gt;"), strings);
+    });
+
+    await test('the desktop entry points at the binary build.sh produces', () => {
+      const desktop = fs.readFileSync(written.targets.linux.paths.desktop, 'utf8');
+      assert.match(desktop, /^Exec=bl-player$/m);
+      assert.match(desktop, /^Icon=com\.example\.game$/m);
+      assert.match(desktop, /^Name=Tom & Jerry's <测试>$/m);
+    });
+
+    await test('--no-gzip stores the page itself and says so', () => {
+      const plain = apps.writeAppResources(sb3, Object.assign({}, common,
+        {target: 'macos', gzip: false}));
+      const payload = fs.readFileSync(plain.targets.macos.paths.html);
+      assert.ok(payload.equals(html), 'the payload should be the raw HTML');
+      assert.match(fs.readFileSync(plain.targets.macos.paths.meta, 'utf8'), /^gzip=0$/m);
+    });
+
+    await test('an icon is written where each target looks for it', () => {
+      const iconPath = path.join(root, 'icon.png');
+      fs.writeFileSync(iconPath, png);
+      const withIcon = apps.writeAppResources(sb3, Object.assign({}, common,
+        {target: 'all', icon: apps.resolveAppIcon(iconPath)}));
+
+      assert.ok(fs.readFileSync(withIcon.targets.macos.paths.icon).equals(png));
+      assert.match(fs.readFileSync(withIcon.targets.macos.paths.plist, 'utf8'),
+        /<key>CFBundleIconFile<\/key>\s*<string>AppIcon<\/string>/);
+      assert.ok(fs.existsSync(path.join(withIcon.targets.android.dir,
+        'res', 'mipmap', 'ic_launcher.png')));
+      assert.match(fs.readFileSync(withIcon.targets.android.paths.manifest, 'utf8'),
+        /android:icon="@mipmap\/ic_launcher"/);
+      assert.ok(fs.readFileSync(withIcon.targets.linux.paths.icon).equals(png));
+    });
+
+    await test('a .ico is refused with a message that names the right format', () => {
+      const icoPath = path.join(root, 'icon.ico');
+      // Enough of an ICONDIR for the sniffer to say "ico".
+      fs.writeFileSync(icoPath, Buffer.from([0, 0, 1, 0, 1, 0, 16, 16, 0, 0, 1, 0, 32, 0]));
+      assert.throws(() => apps.resolveAppIcon(icoPath), /\.png/);
+      assert.throws(() => apps.resolveAppIcon(path.join(root, 'nope.png')), /ENOENT/);
+    });
+
+    await test('bundle ids are normalized into something both OSes accept', () => {
+      // Hyphens are legal on macOS/CFBundleIdentifier and illegal in an Android
+      // applicationId, so one id for both has to use underscores.
+      assert.strictEqual(apps.bundleId('', 'My Game!'), 'dev.bilup.my_game');
+      assert.strictEqual(apps.bundleId('com.9lives/my-game', 'x'), 'com.a9lives_my_game');
+      assert.strictEqual(apps.bundleId('single', 'x'), 'dev.single');
+      // Non-ASCII cannot appear in an applicationId; '_' per code point, then a
+      // leading letter because no segment may start with one of those.
+      assert.strictEqual(apps.bundleId('dev.bilup.测试', ''), 'dev.bilup.a__');
+    });
+
+    await test('file names keep UTF-8 but lose what a file system refuses', () => {
+      assert.strictEqual(apps.safeName('测试游戏 Test'), '测试游戏 Test');
+      assert.strictEqual(apps.safeName('a/b\\c:d*e?f"g<h>i|j'), 'a b c d e f g h i j');
+      assert.strictEqual(apps.safeName('   '), 'bl-app');
+      assert.strictEqual(apps.safeName('x'.repeat(100)).length, 60);
+    });
+
+    await test('an unknown target is refused before anything is written', () => {
+      assert.throws(() => apps.writeAppResources(sb3, {target: 'windows', root}), /unknown target/);
+      assert.throws(() => apps.writeAppResources(sb3, {target: '', root}), /no target/);
+      assert.throws(() => apps.writeAppResources(sb3, Object.assign({}, common,
+        {orientation: 'sideways'})), /unknown orientation/);
+      assert.throws(() => apps.writeAppResources(sb3, Object.assign({}, common,
+        {windowMode: 'floating'})), /unknown window mode/);
+    });
+
+    await test('the build scripts are all present and executable-by-bash', () => {
+      for (const target of apps.TARGETS) {
+        const script = path.join(ROOT, 'hosts', target, 'build.sh');
+        const text = fs.readFileSync(script, 'utf8');
+        assert.match(text, /^#!\/usr\/bin\/env bash/, `${target} needs a bash shebang`);
+        // CRLF in a shell script is `$'\r: command not found'` on Linux; these
+        // files are authored on Windows, so the bytes are asserted, not assumed.
+        assert.ok(!text.includes('\r'), `${target}/build.sh has CRLF line endings`);
+        // Every script reports artifacts on this exact prefix; the CLI parses it.
+        assert.match(text, /^echo "ARTIFACT /m);
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------------
   section('[ui server: the HTTP path is the same pipeline]');
   // -------------------------------------------------------------------------
   // The web UI is a third front end onto src/lib/pipeline.js. These tests drive
@@ -718,7 +1303,7 @@ const main = async () => {
     const http = require('node:http');
     const os = require('node:os');
     const {createServer, listen} = require('../ui/server');
-    const {packToHtml} = require('../src/lib/pipeline');
+    const {packToHtml, packToZip} = require('../src/lib/pipeline');
 
     // A canvas-style fixture on purpose: filter 0 / level 6 is what
     // canvas.toDataURL emits, and it is the only shape of PNG the lossless
@@ -749,6 +1334,26 @@ const main = async () => {
             }
           ],
           monitors: [], extensions: [], meta: {semver: '3.0.0', vm: '0.0.0'}
+        }), 'utf8')
+      },
+      {name: pngName, data: png}
+    ]);
+
+    // The same project, but with an extension whose source only exists on the
+    // internet — the case baking is for.
+    const extensionSb3 = writeZip([
+      {
+        name: 'project.json',
+        data: Buffer.from(JSON.stringify({
+          targets: [{
+            isStage: true, name: 'Stage', variables: {}, lists: {}, broadcasts: {},
+            blocks: {}, comments: {}, costumes: [costume], sounds: [], volume: 100,
+            layerOrder: 0, tempo: 60, videoTransparency: 50, videoState: 'off'
+          }],
+          monitors: [],
+          extensions: ['blTest'],
+          extensionURLs: {blTest: 'https://x/blTest.js'},
+          meta: {semver: '3.0.0', vm: '0.0.0'}
         }), 'utf8')
       },
       {name: pngName, data: png}
@@ -935,6 +1540,99 @@ const main = async () => {
         // Still the same pipeline: the query string must not be a second,
         // slightly different way of building the page.
         assert.ok(served.equals(packToHtml(sb3, options).html));
+      });
+
+      await test('POST /api/pack with target=zip returns the same archive as the CLI', async () => {
+        const res = await post('/api/pack', sb3, '?filename=demo.sb3&target=zip&title=Site');
+        assert.strictEqual(res.status, 200);
+        assert.strictEqual(res.headers.get('content-type'), 'application/zip');
+        assert.match(decodeURIComponent(res.headers.get('x-pack-filename')), /\.zip$/);
+
+        const served = Buffer.from(await res.arrayBuffer());
+        const expected = packToZip(sb3, {inputPath: 'demo.sb3', title: 'Site'}).zip;
+        assert.ok(served.equals(expected), `served ${served.length} bytes, CLI produced ${expected.length}`);
+
+        const entries = readZip(served);
+        assert.ok(entries.has('index.html'));
+        assert.ok(entries.has('project.json'));
+        assert.ok([...entries.keys()].some((name) => name.startsWith('assets/')));
+      });
+
+      await test('POST /api/pack bakes the extensions sent in the query string', async () => {
+        const source = 'Scratch.extensions.register({getInfo: () => ({id: "blTest", name: "T", blocks: []})});';
+        const extensions = JSON.stringify([{name: 'blTest.js', source}]);
+        const res = await post('/api/pack', extensionSb3,
+          '?filename=demo.sb3&target=zip&extensions=' + encodeURIComponent(extensions));
+        assert.strictEqual(res.status, 200);
+
+        const entries = readZip(Buffer.from(await res.arrayBuffer()));
+        const projectJSON = JSON.parse(entries.get('project.json').data.toString('utf8'));
+        assert.match(projectJSON.extensionURLs.blTest, /^data:text\/javascript/,
+          'the baked source must be in the page, not the https URL');
+
+        // Without a source the same project would still point at the internet.
+        const plain = await post('/api/pack', extensionSb3, '?filename=demo.sb3&target=zip');
+        const plainJSON = JSON.parse(readZip(Buffer.from(await plain.arrayBuffer()))
+          .get('project.json').data.toString('utf8'));
+        assert.strictEqual(plainJSON.extensionURLs.blTest, 'https://x/blTest.js');
+      });
+
+      await test('extensions that carry no source, or too much, are refused', () => {
+        const {readExtensions, MAX_EXTENSION_BYTES} = require('../ui/server');
+        const encode = (value) => new URLSearchParams({extensions: JSON.stringify(value)});
+
+        assert.throws(() => readExtensions(encode([{name: 'x.js'}])), /has no source/);
+        assert.throws(() => readExtensions(encode([{name: 'x.js', source: 'a'.repeat(MAX_EXTENSION_BYTES + 1)}])),
+          /the limit is/);
+        assert.throws(() => readExtensions(new URLSearchParams({extensions: '{not json'})), /not valid JSON/);
+
+        // A file name is used as a download hint; a path separator in it would be
+        // an easy way to write somewhere else.
+        const [entry] = readExtensions(encode([{name: '../../evil.js', source: 'x'}]));
+        assert.ok(!/[\\/]/.test(entry.name), `unsanitised name: ${entry.name}`);
+      });
+
+      await test('POST /api/pack-exe writes an icon, a version resource and a window mode', async () => {
+        const icoHex = '00000100010010100000010020006804000016000000';
+        const icon = `data:image/x-icon;base64,${Buffer.from(icoHex, 'hex').toString('base64')}`;
+        const res = await post('/api/pack-exe', sb3,
+          '?filename=demo.sb3&title=Iconic&icon=' + encodeURIComponent(icon) +
+          '&version=1.2.3&windowMode=maximize&build=0');
+        assert.strictEqual(res.status, 200);
+        const data = await res.json();
+        assert.strictEqual(data.report.windowMode, 'maximize');
+        assert.strictEqual(data.report.icon, 'app.ico');
+
+        const dir = path.join(tmpRoot, 'exe', 'build');
+        assert.match(fs.readFileSync(path.join(dir, 'app.meta'), 'utf8'), /window=maximize\n/);
+        assert.ok(fs.existsSync(path.join(dir, 'app.ico')), 'the icon file was not written');
+
+        const rc = fs.readFileSync(path.join(dir, 'app.rc'), 'utf8');
+        assert.match(rc, /1 ICON "app\.ico"/);
+        assert.match(rc, /1 VERSIONINFO/);
+        assert.match(rc, /FILEVERSION 1,2,3,0/);
+        assert.match(rc, /VALUE "ProductVersion", "1\.2\.3"/);
+        // rc.exe parses this file in the OEM code page: one non-ASCII byte turns
+        // into a build failure nobody can read.
+        assert.ok(rc.split('').every((c) => c.charCodeAt(0) < 0x80), 'app.rc must stay ASCII');
+      });
+
+      await test('an icon that is not an .ico is refused before rc.exe sees it', async () => {
+        const notAnIcon = imageDataUri(
+          Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489' +
+            '0000000d4944415478da63f8ffff3f0005fe02fea7d6a4c00000000049454e44ae426082', 'hex'),
+          'app.png');
+        const res = await post('/api/pack-exe', sb3,
+          '?filename=demo.sb3&icon=' + encodeURIComponent(notAnIcon));
+        assert.strictEqual(res.status, 400);
+        assert.match((await res.json()).error, /\.ico/);
+      });
+
+      await test('an unreadable loading-screen image is a 400, not a broken page', async () => {
+        const res = await post('/api/pack', sb3,
+          '?filename=demo.sb3&loadingImage=' + encodeURIComponent('data:text/plain,hello'));
+        assert.strictEqual(res.status, 400);
+        assert.match((await res.json()).error, /not an image/);
       });
 
       await test('POST /api/pack rejects an empty body instead of packing nothing', async () => {

@@ -5,3 +5,12 @@
 # way it does.
 .github/ export-ignore
 .workbuddy/ export-ignore
+
+# The native hosts are consumed by bash, clang and javac on macOS/Linux. A CRLF
+# checkout turns every build script into `$'\r': command not found` before it gets
+# as far as the compiler, so the line ending is pinned rather than assumed.
+*.sh   text eol=lf
+*.c    text eol=lf
+*.m    text eol=lf
+*.java text eol=lf
+*.yml  text eol=lf

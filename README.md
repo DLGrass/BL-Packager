@@ -1,12 +1,19 @@
 # bl-packager
 
-把 `.sb3` 打包成**单文件 HTML** 或**单文件 Windows .exe**，机制仿照
+把 `.sb3` 打包成**单文件 HTML**、**静态站点（ZIP）**、**单文件 Windows .exe**，或
+**macOS `.app` / Linux 可执行文件 / Android `.apk`**，机制仿照
 [TurboWarp/packager](https://github.com/TurboWarp/packager)，
 并对**打开时的素材加载**与**体积**做了针对性优化与实测
 （结论见第 5、6 节，**包含一项没测出收益、和一项需要前置条件才成立的结果**）。
 
 零依赖：只用 Node 内置模块（`node:zlib` / `node:crypto` / `node:fs`），打包器本身没有构建步骤。
-`.exe` 那一步用系统已有的 MSVC 编译，只用 Windows SDK 与 WebView2 SDK。
+`.exe` 那一步用系统已有的 MSVC 编译，只用 Windows SDK 与 WebView2 SDK；
+macOS / Linux / Android 三个原生宿主各自用平台的 WebView SDK 编译，见第 8 节。
+
+上游 TurboWarp 打包器能做的，这里**除了「必须联网」和「需要另一套 npm 工具链」的那几项，
+其余都补齐了**，见 4.1 的对照表——包括自定义扩展烘焙、加载页图片、自定义指针、
+指针锁定 / 手柄、特殊云变量行为、应用图标与窗口模式。补齐后**没有任何联网依赖**：
+扩展源码在打包时烘进产物，打开产物时不再回网络。
 
 同一条管线也能**整个搬进浏览器**跑（`node:zlib` / `node:crypto` / `fs` 都由仓库内自带的实现顶上），
 所以除了 CLI 和本地网页版，还有第三个交付形态：一个**纯前端的静态站点**，作品不经过任何服务器，
@@ -16,8 +23,15 @@
 ```bash
 node src/pack.js project.sb3 -o out/project.html
 node src/pack.js project.sb3 --mode=both --out-dir=out --instrument
+node src/pack.js project.sb3 --target zip -o out/site.zip
+node src/pack.js project.sb3 --extension my-ext.js --pointerlock
 
 node src/pack-exe.js project.sb3 --title "My Game"    # 生成资源，再由 exe/build.cmd 编译
+
+node src/pack-app.js project.sb3 --target macos       # .app / .zip / .dmg（需 macOS）
+node src/pack-app.js project.sb3 --target linux       # ELF + .tar.gz（需 Linux）
+node src/pack-app.js project.sb3 --target android     # .apk（需 Android SDK）
+node src/pack-app.js project.sb3 --target all         # 一次渲染，三个目录都写
 
 node ui/server.js                                     # 网页版：http://127.0.0.1:8788
 ```
@@ -30,6 +44,9 @@ pnpm install            # 没有依赖，只会生成 pnpm-lock.yaml
 pnpm test               # = node test/run.js
 pnpm pack:html project.sb3 -o out/project.html
 pnpm pack:exe project.sb3
+pnpm pack:mac project.sb3       # = node src/pack-app.js --target macos
+pnpm pack:linux project.sb3
+pnpm pack:android project.sb3
 pnpm ui                 # 网页版
 pnpm build:site         # 纯前端静态站点 → site/（可直接扔进任意静态托管）
 pnpm bench / ui-check / make-project
@@ -73,8 +90,10 @@ HTML 里跑的还是 scratch-vm。被打包器改写过的只有：
 
 - `project.json` 的块 ID 按引用频次重编号，删掉 `x/y/comment` 等冗余字段（`src/lib/sb3.js`）
 - 名字以 `☁` 开头的变量自动标记为云变量
+- PNG 素材被无损重压时，素材名跟着换成新内容的 md5（`md5ext` 仍然诚实）
+- 指定了 `--extension` 时，`extensionURLs` 里的地址被换成源码的 `data:` URL（4.4）
 
-所以产物的 `project.json` 和原始 sb3 的**字节必然不同**，这是语义等价的压缩，不是篡改。
+所以产物的 `project.json` 和原始 sb3 的**字节必然不同**，这是语义等价的压缩/改写，不是篡改。
 
 ---
 
@@ -187,9 +206,22 @@ const bufferCopy1 = sound.data.buffer.slice(0);
 ```
 node src/pack.js <project.sb3> [options]
 
-  -o, --out <file>        输出 html（单模式）
+  -o, --out <file>        输出路径（单模式）
       --out-dir <dir>     输出目录（--mode=both）
+      --target <t>        html | zip             默认 html
+                          zip = index.html + project.json + assets/，给静态托管用，
+                          必须通过 http(s) 访问（file:// 下 fetch 读不到目录）
       --mode <m>          fast | tw | both          默认 fast
+      --extension <spec>  把自定义扩展烘进产物：本地 .js 路径，或打包期抓一次的 URL。
+                          可重复。不给它，引用远程扩展的作品离线就打不开
+      --loading-image <f> 加载页图片（png/jpeg/gif/webp/bmp/svg）
+      --loading-image-mode <m>  normal | stretch    默认 normal
+      --cursor-image <f>  自定义指针图案（自动切到 cursor=custom）
+      --cursor-center <x,y>     指针热点             默认 0,0
+      --pointerlock       指针锁定 addon
+      --gamepad           手柄 addon
+      --special-cloud-behaviors  ☁ url / redirect / username … 特殊行为
+      --unsafe-cloud-behaviors   ☁ eval 等「不安全」行为
       --scaffolding <f>   覆盖运行时脚本
       --full-runtime      即使没有 music 扩展也用 scaffolding-full
       --title <text>      窗口标题
@@ -201,6 +233,7 @@ node src/pack.js <project.sb3> [options]
       --view-assets       把素材以解码缓冲的**视图**交给 VM。这是个**回归开关**，
                           仅用于复现 3.3 节的性能灾难，生产不要用
       --no-deflate        所有条目原样存储（产物不做任何解压）
+      --no-optimize-png   保留 sb3 里的 PNG 原样（默认无损重压）
       --deflate-index     顺带尝试压缩容器索引
       --instrument        注入跑分钩子，把计时 POST 到 /__result
       --json              以 JSON 输出统计
@@ -210,8 +243,12 @@ node src/pack.js <project.sb3> [options]
 
 `--options` 收的就是网页版「导出」写出的那份文件（`{app, version, options}` 外壳会自动剥掉），
 所以「在界面上调好 → 导出 → 命令行复现」是同一条路。手写的 `--title` / `--autoplay` /
-`--turbo` / `--framerate` / `--username` / `--preload` 仍然可用，并且**覆盖**选项文件里的同名项。
-`pack-exe.js` 收同一套。
+`--turbo` / `--framerate` / `--username` / `--preload` / `--extension` / `--pointerlock` 等
+仍然可用，并且**覆盖**选项文件里的同名项。`pack-exe.js` 收同一套（多了 `--icon` /
+`--version` / `--window-mode`）。
+
+图片类选项两种写法都认：`--options` 里的 `"loadingImage": "logo.png"` 是路径，界面上传的则是
+`data:` URL——`pipeline.resolveImage()` 一个函数负责两种形态，渲染器只会看到后者。
 
 `--mode=tw` 产出的就是 TurboWarp 的原始策略（内嵌 sb3 + JSZip），保留它是为了做 A/B 对照。
 
@@ -232,12 +269,13 @@ node ui/server.js --port 9000 --open
 | 卡片 | 对应上游 | 里面的项 |
 |---|---|---|
 | 运行选项 | `options.runtimeOptions` | 加速模式、帧率、补帧、高清画笔、无限克隆、角色可穿过边缘、移除其他限制、用户名、停止时关闭窗口；舞台（自定义舞台大小、三种缩放模式） |
-| 展示选项 | `options.playerOptions` | 页面标题；加载页（进度条、提示文本）；控制栏（自动运行、绿旗/停止/暂停/全屏按钮）；颜色（背景/前景/主题色）；监视器（允许编辑列表、变量颜色、列表颜色） |
-| 输入 | `options.interaction` | 正常指针 / 无指针 |
-| 云变量 | `options.cloudVariables` | 忽略 / 存储在本地浏览器，以及「作品 ID」 |
+| 展示选项 | `options.playerOptions` | 页面标题；加载页（进度条、提示文本、**加载页图片**）；控制栏（自动运行、绿旗/停止/暂停/全屏按钮）；颜色（背景/前景/主题色）；监视器（允许编辑列表、变量颜色、列表颜色） |
+| 输入 | `options.interaction` | 正常指针 / 无指针 / **自定义指针图案 + 热点**；**指针锁定**、**手柄** |
+| 云变量 | `options.cloudVariables` | 忽略 / 存储在本地浏览器，以及「作品 ID」；**特殊 / 不安全云变量行为** |
 | 高级选项 | `options.advancedOptions` | 使用编译、循环计时器、自定义 CSS、自定义 JS、加载后移除原始素材数据、增大最大矢量图像分辨率 |
+| **自定义扩展** | `options.extensions` + `bakeExtensions` | 选本地 `.js`，源码烘进产物（4.4） |
 | 本打包器专用 | —— | 素材容器 `fast`/`tw`、PNG 无损重压、不压缩容器条目、预热素材 |
-| 运行环境 | `options.environment` | 单文件 HTML / Windows 应用程序（EXE）；选 EXE 时展开应用设置 |
+| 运行环境 | `options.environment` | 单文件 HTML / **静态网站（ZIP）** / Windows 应用程序（EXE）；选 EXE 时展开应用设置（窗口尺寸、启动模式、图标、版本号、F12） |
 
 页面上只有**一张**输出卡：状态行。载入作品时它是作品摘要，打包完成后它就是**下载链接**
 （`#downloads` 挂在 `#statusCard` 里），细节报表收在折叠的 `<details>` 里。
@@ -255,13 +293,12 @@ node ui/server.js --port 9000 --open
 上游给每个分区一个不同的强调色，这里没有跟：那会把好不容易换成品牌色的界面又花回去，
 分区靠标题就能区分。
 
-和 TW 刻意不同的地方：
+和 TW 刻意不同的地方（界面层面的取舍）：
 
 | | TurboWarp | 这里 |
 |---|---|---|
 | 导入方式 | Scratch 作品 ID / 文件 / 其他 URL | 只有文件 |
 | 云变量 | 连 `clouddata.turbowarp.org` 实时同步 / 本地存储 / 逐变量自定义 / 忽略 | 只有本地存储 / 忽略 |
-| 目标 | html / zip / electron / nwjs / wkwebview | 单文件 HTML / Windows EXE |
 | 界面风格 | 每个分区一个强调色，主色 `#ff4c4c` | 单一品牌色 `#75c1c4`（几何与分组一致） |
 | 输出 | 结果卡 + 下载区 + 统计 | 只有状态行，下载链接就在上面 |
 
@@ -270,16 +307,43 @@ node ui/server.js --port 9000 --open
 浏览器只负责拖拽、显示统计和下载；静态站点（4.2）连那一步也在浏览器里，
 任何形态下作品都不离开这台机器。
 
-上游还有四类选项这里**一个都没摆**，因为它们在这台机器上不可能真的生效：
+#### 功能对照（逐项）
 
-| 缺的能力 | 为什么 |
-|---|---|
-| 指针锁定 / 手柄 | 靠 addons 里的额外区块，`scaffolding-min.js` 里没有 |
-| 自定义扩展（含「烘焙进产物」） | 要么联网下载，要么把扩展源码整段嵌进去，与「不联网」冲突 |
-| 自定义指针图案 / 加载页图片 | 需要一条图片上传通道，这套 API 没有 |
-| zip / electron / nwjs / WKWebView 目标 | 只实现了 HTML 与 Windows EXE 两条产线 |
+这一节是「上游有的，这里有没有」的完整清单，也是补功能时的验收表。
 
-摆一个点不动、或者点了不生效的选项比不摆更糟，所以宁缺勿滥。
+| 上游的能力（`PackagerOptions.svelte` 里的项） | 这里 | 实现在哪 |
+|---|---|---|
+| 目标：`html` | ✅ 单文件 HTML | `src/lib/html.js` |
+| 目标：`zip`（给静态托管用） | ✅ `--target zip`，见 **4.5** | `packToZip()` + loader 的 `http` 模式 |
+| 目标：`electron-*` / `nwjs-*` / `webview-mac` | ❌ 需要另一套 npm 工具链 | —— |
+| 运行时：加速模式 / 帧率 / 补帧 / 高清画笔 / 克隆上限 / 围栏 / 其他限制 / 用户名 / 停止时关窗 / 舞台尺寸 / 缩放模式 / 最大纹理 | ✅ | `html.js` 的 boot 脚本 |
+| 播放器：标题 / 进度条 / 加载文本 / 四个控制按钮 / 三种颜色 / 监视器颜色 / 允许编辑列表 / 自定义 CSS / 自定义 JS | ✅ | 同上 |
+| 播放器：**加载页图片**（`normal` / `stretch`） | ✅ 见 **4.6** | `loadingImage` / `loadingImageMode` |
+| 交互：正常指针 / 无指针 | ✅ | `cursor` |
+| 交互：**自定义指针图案 + 热点** | ✅ 见 **4.6** | `cursorCustom` / `cursorCenterX,Y` |
+| 交互：**指针锁定（`chunks.pointerlock`）** | ✅ 见 **4.7** | `pointerlock` |
+| 交互：**手柄（`chunks.gamepad`）** | ✅ 见 **4.7** | `gamepad` |
+| 云变量：忽略 / 存本地浏览器 | ✅ | `cloudMode` |
+| 云变量：**特殊名字行为**（`☁ url` / `☁ redirect` / `☁ username` …） | ✅ 见 **4.7** | `specialCloudBehaviors` |
+| 云变量：**不安全行为**（`☁ eval` …） | ✅ 见 **4.7** | `unsafeCloudBehaviors` |
+| 云变量：WebSocket 实时同步 / 自定义服务器 / 逐变量单独设置 | ❌ 都要联网 | —— |
+| 高级：使用编译 / 循环计时器 / 增大矢量分辨率 / 加载后移除原始素材 | ✅ | `compilerEnabled` / `warpTimer` / `maxTextureDimension` / `packagedRuntime` |
+| 高级：**自定义扩展（URL 列表）+ `bakeExtensions`** | ✅ 见 **4.4**，且不需要联网 | `src/lib/extensions.js` |
+| 应用：`app.icon` | ✅ EXE 图标，见 **6.4** | `--icon` / `app.rc` 的 `ICON` |
+| 应用：`app.version` | ✅ EXE 的版本资源，见 **6.4** | `--version` |
+| 应用：`app.windowMode`（窗口 / 最大化 / 全屏） | ✅ 见 **6.4** | `--window-mode` + `main.cpp` |
+| 应用：`escapeBehavior`（Esc 在全屏时的行为） | ⚠️ 固定为「只退出全屏」 | `main.cpp` 的 `WM_KEYDOWN` |
+| 应用：`packageName` / `windowControls`（无边框） / `backgroundThrottling` | ❌ Electron 专属 | —— |
+| Steamworks 扩展配置 | ❌ 宿主不是 Electron | —— |
+| 作品 ID / 其他 URL 导入 | ❌ 需要联网 | —— |
+
+「不联网」这条线的处理方式值得单独说一句：**联网的位置从「打开产物时」挪到了「打包时」**。
+扩展源码、加载页图片、指针图案都是打包时读进去、烘成 `data:` URL 写进产物的，
+所以产物本身仍然可以在断网的机器上双击打开——这正是 README §7 曾经列为
+「最常见的打包后打不开的原因」的那件事（见 4.4）。唯一可能联网的入口是
+`--extension https://…`：那是**你明确指名的一个 URL**，抓一次，产物里不含它。
+
+摆一个点不动、或者点了不生效的选项比不摆更糟，所以上表里 ❌ 的项在界面上根本不出现。
 
 仍然是零依赖——只用了 `node:http`。三个前端（`src/pack.js`、`src/pack-exe.js`、
 `ui/server.js`）都调 `src/lib/pipeline.js`，所以「同一个选项」在三处的含义必然一致；
@@ -288,8 +352,10 @@ node ui/server.js --port 9000 --open
 所以界面上不可能出现一个「发得出去、没人接」的开关。
 
 界面上独有的东西（也就是这个打包器自己的功能）：素材容器 `fast`/`tw` 对照、
-PNG 无损重压、预热素材、不压缩容器条目，以及 Windows EXE 目标（应用设置：窗口尺寸、
-F12 开发者工具、顺带编译）。另外「载入作品」那一步会先解析归档并报出里面有什么
+PNG 无损重压、预热素材、不压缩容器条目、静态站点（ZIP）目标，以及 Windows EXE 目标
+（应用设置：窗口尺寸、启动模式、图标、版本号、F12 开发者工具、顺带编译）。
+「自定义扩展」「加载页图片」「自定义指针」是补齐上游的功能（4.4 / 4.6），命令行同样有。
+另外「载入作品」那一步会先解析归档并报出里面有什么
 （角色/素材/扩展/云变量数量/运行时/是否需要 full 版），`/api/inspect` 只解析、不做重压——
 那是打包时才该付的代价。
 
@@ -300,6 +366,8 @@ F12 开发者工具、顺带编译）。另外「载入作品」那一步会先�
 | 只绑 `127.0.0.1` | 不暴露到局域网 |
 | 校验 `Host` 头 | 防 DNS rebinding：网页里的 JS 本来能访问 127.0.0.1 |
 | 上传上限 512 MiB | 防止把内存写爆 |
+| 图片与扩展源码按内容校验后重新编码 | 一张 percent-encoded 的「图片」可以把 `"` 或 `<` 带进 `url("…")`；`app.rc` 里放一个假 `.ico` 会让编译失败 |
+| 单个扩展 2 MiB / 合计 6 MiB / 单张图片 2 MiB | 选项走 query string（4.6），所以每个上传项都必须有自己上限，超了回 413 |
 | `/api/artifact` 走白名单 + 路径前缀校验 | 防目录穿越 |
 | exe 请求串行化 | 并发会互相覆盖同一份 `app.html.gz` |
 | 产物列表按 mtime 过滤 | `exe/build/` 是共享且不清理的，只列本轮写出的文件 |
@@ -378,16 +446,172 @@ Pages 站点是**公开**的，所以别把私有作品传上去打包——它�
 ```
 https://packager.turbowarp.org/scaffolding/scaffolding-min.js    # 2.5 MB 未压缩 / 1.7 MB 实际
 https://packager.turbowarp.org/scaffolding/scaffolding-full.js   # 用到 music 扩展时才需要
+https://packager.turbowarp.org/scaffolding/addons.js             # 可选：指针锁定/手柄/云变量行为，21 KB
 ```
 
-没用到 music 扩展的项目会自动选 `-min`，省下约 2 MB。
+没用到 music 扩展的项目会自动选 `-min`，省下约 2 MB。`addons.js` 只在用到 4.7 那几项时才需要，
+缺了它打包会**明确报错并给出这个地址**，而不是静默掉功能。
+
+---
+
+### 4.4 自定义扩展：把源码烘进产物
+
+这是本项目里唯一一项「上游有、而且不补就会天天踩」的功能。§7 曾经把它列成
+「打包后打不开」最常见的原因，现在它被修掉了：
+
+```
+project.json: { "extensions": ["pen", "myExt"],
+                "extensionURLs": { "myExt": "https://extensions.turbowarp.org/myExt.js" } }
+```
+
+打开产物时 scratch-vm 会调 `extensionManager.loadExtensionURL(那个 https 地址)`——
+一个离线的产物在这里必然失败。`src/lib/extensions.js` 做两件事：
+
+1. **包装 + 编码**：把源码包成 `(function(Scratch) { … })(Scratch);`（与上游一字不差，
+   这样为沙箱写的扩展不会往页面里漏全局），再编码成 `data:` URL。选 `data:` 而不是
+   `blob:` 是查过代码的：Scaffolding 的 `_isValidExtensionURL()` 只认
+   `http/https/data/file`，`blob:` 会抛 `Invalid extension URL`。
+   base64 与 percent-encoding 都生成一遍，**取短的那个**（平均 base64 赢，源码
+   里空格多时差距明显）。
+2. **两处落地**：
+   - `project.json` 的 `extensionURLs[id]` **替换**成这个 data URL；
+   - 同时在 boot 脚本里**提前 load 一遍**。
+
+第二点是实测出来的，不是保险起见。Scaffolding 的 `_loadExtensions()` 遍历的是
+**积木里用到的 id**（`installTargets` 那一侧收集的），不是 `project.json` 的
+`extensions` 数组。所以「作品声明了一个扩展、但没有任何积木引用它」时，
+VM 根本不会去加载它——极端情况是**一个没有积木的作品**。第一版只做了 (1)，
+在无头浏览器里打开产物：`targets: 1`、没有报错、扩展的全局标记却是 `false`；
+加上提前加载之后才变成 `true`。现在的说法是：提前加载是**必须品**，改写 URL 是**兜底**。
+
+**id 怎么认出来的**（顺序即优先级）：
+
+| 手段 | 依据 | 例 |
+|---|---|---|
+| `declares` | 源码里的短字符串字面量 ∩ `project.json` 还在指向 URL 的 id，**恰好命中一个** | 源码里 `id: 'myExt'` |
+| `filename` | 文件名（去扩展名）与某个需要的 id 相同 | `myExt.js` |
+| `only-one-left` | 只剩一个没匹配的文件、一个没填的 id，一对一配上 | —— |
+| `eager` | 都不成立：仍提前加载，但不敢乱配对，并 warn | 加一个项目没引用的扩展 |
+
+两个候选就不猜（会静默接错线），这一步有测试盯着。匹配不上的、以及仍然指向远程的 id，
+会分别报出来：CLI 打 `extension! still remote: …`，界面上是「仍需联网」的红色行。
+
+**命令行**：
+
+```bash
+node src/pack.js x.sb3 --extension my-ext.js                 # 本地文件
+node src/pack.js x.sb3 --extension https://…/my-ext.js       # 打包时抓一次
+node src/pack.js x.sb3 --extension a.js --extension b.js      # 可重复
+```
+
+URL 只抓一次、只抓你指名的那个，产物里不含它（产物的 `connect-src` 仍然允许联网，
+但扩展不会再请求它）。界面里只提供「选本地文件」，因为让本地服务器去抓任意 URL
+是没有必要多开的一个面。
+
+**代价**：源码变成 base64 后约 1.33 倍，进容器时还会再被 base85 撑 25%——所以
+`--json` / 界面报表里会写明每个扩展 `bytes → uriBytes`。一个 100 KB 的扩展通常
+让产物大 150–180 KB，换来的是**离线可用**。
+
+---
+
+### 4.5 ZIP 目标：给静态托管用的形态
+
+```bash
+node src/pack.js x.sb3 --target zip -o out/site.zip
+# 解压后：index.html + project.json + assets/<md5ext>
+```
+
+界面里对应「运行环境 → 静态网站（ZIP）」。**必须通过 http(s) 访问**：`file://` 下
+`fetch()` 读不到同级目录，loader 会直接报「project.json is not next to index.html —
+the zip has to be served over http(s), not opened from disk」，而不是白屏。
+
+它和单文件版的区别不是"少一点东西"，而是**换了一种加载模型**：
+
+| | 单文件 HTML | ZIP（`http` 模式） |
+|---|---|---|
+| 载荷 | base85 + BLPK，整包内联 | 无载荷：`fetch('project.json')` + 按需 `fetch('assets/<md5ext>')` |
+| 解压 | 容器里只解真正压小的条目 | **一次都不解**，压不压交给 web 服务器 |
+| 并行 | 解码串行（分块边解析边解） | 浏览器自己并发，VM 要一个来一个 |
+| 缓存 | 20 MB 的 HTML 每次重下 | 每个素材一个 URL，第二次访问基本走缓存 |
+| 体积 | 18.71 MB | **14.24 MB**（同一工程，−24%） |
+| 内联了什么 | 运行时 + 解码器 + BLPK 读取器 | 只有运行时（`inflate-raw` / `container-reader` 都不进产物） |
+
+体积差不是优化，是**算术**：base85 把任意字节撑 25%，外层 gzip 只能找回其中一部分；
+素材单独成文件就没有这笔税。所以「单文件版更小」是错觉，只是它更方便。
+
+两个实现细节值得记一笔：
+
+- 目录结构是 `assets/<md5ext>` 扁平化。原始 sb3 里素材可能在子目录下，但 VM 永远只问
+  `<md5ext>`，保留层级是没有意义的。
+- 产物是**逐字节确定**的（`writeZip` 用固定的 DOS 时间戳），所以「同一次输入 → 同一份 zip」
+  可以直接断言，测试里就是这么写的。
+
+---
+
+### 4.6 加载页图片与自定义指针
+
+两者都是 `data:` URL 内联，所以离线可用，也不需要额外的上传通道。
+
+```bash
+node src/pack.js x.sb3 --loading-image logo.png --loading-image-mode stretch
+node src/pack.js x.sb3 --cursor-image cursor.png --cursor-center 4,8
+```
+
+| 选项 | 值 | 说明 |
+|---|---|---|
+| `loadingImage` | data URL / 路径 | 加载页图片 |
+| `loadingImageMode` | `normal` / `stretch` | `normal` 是一个 `<img>`（上限 60vw × 40vh，等比）；`stretch` 是背景图 `contain` 铺满整屏 |
+| `cursorCustom` | data URL / 路径 | 指针图案。**给了图就自动切到 `cursor: custom`**，除非你把 `cursor` 显式设成 `none`（隐藏指针是更具体的意图） |
+| `cursorCenterX/Y` | 整数 | 热点，落在 CSS 的 `url(…) x y, auto` 里 |
+
+**所有图片都过 `src/lib/datauri.js`**，它做三件事，缺一不可：
+
+1. **按内容识别**，不信扩展名。一个改名的 `.txt` 变成一张破图是最难查的那种 bug；
+   `.ico` 更是硬要求——`rc.exe` 的 `ICON` 语句不吃 PNG，而报错信息不会告诉你这一点。
+2. **重新编码成 base64**。前端送来的是 `data:` URL，可能是 percent-encoded 的；
+   一个 `"` 或 `<` 如果原样进了 `url("…")` / `src="…"`，就是注入。
+   重新编码是从字节重建，不可能带出这些字符。
+3. **卡大小**：单张 2 MiB（解 base64 后）。
+
+服务器这边，图片和扩展源码都跟其他选项一样走 query string——请求体留给 sb3 本身，
+不用写 multipart 解析器。代价是超长请求行，所以 `ui/server.js` 把
+`maxHeaderSize` 提到 12 MiB，真正的护栏是每一项自己的上限（图片 2 MiB、
+单个扩展 2 MiB、扩展合计 6 MiB）。本机回环、且 Host 头有校验，这个折中是划算的。
+
+---
+
+### 4.7 addons：指针锁定 / 手柄 / 云变量行为 / 真·暂停
+
+上游把这几项拆在 `chunks.*` 和 `cloudVariables.*` 里，实现都在一个独立产物
+`scaffolding/addons.js`（21,885 字节）里，不在运行时主包里。这里做的是同一件事：
+需要时把那个文件**内联进产物**，然后调一次
+
+```js
+ScaffoldingAddons.run(scaffolding, {pointerlock, gamepad, specialCloudBehaviors, unsafeCloudBehaviors, pause});
+```
+
+参数名是照着 addons 包自己的分派写的（`t.gamepad && …`、`t.pointerlock && …`），
+没有自己发明。
+
+| 选项 | 需要 addons 包？ | 没有它时 |
+|---|---|---|
+| `pointerlock` / `gamepad` | **是** | 打包直接失败，并给出下载地址 |
+| `specialCloudBehaviors`（`☁ url` / `☁ redirect` / `☁ open link` / `☁ username` / `☁ set clipboard` / `☁ pasted` / `☁ room id`） | **是** | 同上 |
+| `unsafeCloudBehaviors`（`☁ eval` 等） | **是** | 同上 |
+| `controlPause`（暂停按钮） | 否，但**有就用** | 退回原生的 `vm.setPaused`，功能不变 |
+
+`pause` 这一项值得单独说：addons 里的暂停会把 `vm.setPaused` 换掉，除了停 sequencer，
+还会 **suspend AudioContext**、冻结线程计时器、并让暂停期间 `greenFlag` / `startHats`
+不生效。原生的暂停只停循环，声音还会继续响。所以只要 `vendor/` 里有这个文件，
+暂停按钮就用加强版；**没有文件也不报错**——把一个本来能用暂停按钮的工程变成打包失败，
+比暂停弱一点更糟。
 
 ---
 
 ## 5. 测试与验证
 
 ```bash
-pnpm test                 # = node test/run.js，55 项全部在 Node 里跑（含网页版的 HTTP 端到端）
+pnpm test                 # = node test/run.js，88 项全部在 Node 里跑（含网页版的 HTTP 端到端）
 ```
 
 覆盖内容包括：
@@ -397,6 +621,14 @@ pnpm test                 # = node test/run.js，55 项全部在 Node 里跑（�
 - base85 往返（含非 4 倍数长度），并断言输出**不含** `<>"'&`
 - **纯 JS inflater 与 zlib 逐字节对拍**：9 种载荷 × 4 个压缩级别，含 stored block、全零、20 万随机字节、高度可压缩文本
 - 容器解析：`project.json` 与每个素材**逐字节比对**
+- **扩展烘焙**（4.4）：包装后的 data URL 解回来能跑、真的注册了扩展；四种 id 匹配手段各一条
+  （含「两个候选就不猜」）；匹配不上时保留远程 URL 并 warn；`project.json` 改写后字节数如实更新；
+  没有扩展的工程**一个字节都不动**
+- **图片**（4.6）：按内容识别 png/ico/svg/jpeg/gif、拒绝非图片与超限、percent-encoded 的恶意
+  payload 重编码后不含 `<>"'`
+- **ZIP 目标**（4.5）：档内结构、`index.html` 里确实没有载荷/解码器/容器读取器、素材逐字节相等、
+  两次打包字节相同；`http` 模式的 loader 用 stub `fetch` 跑通 project.json 与每个素材，
+  缺素材返回 `null`、缺 project.json 给出可读的报错
 - **归属语义**（3.3 节的回归护栏）：用一个「随机字节 + 高度可重复标记」的混合容器，
   断言默认路径交付的 buffer **不别名**容器、`byteOffset === 0`、
   且 `buffer.byteLength === byteLength`；再断言 `--view-assets` 确实会别名
@@ -414,6 +646,10 @@ pnpm test                 # = node test/run.js，55 项全部在 Node 里跑（�
 > 抓 bug 的，静默跳过等于没测。
 - **网页版**：起一个真实 HTTP 服务（临时端口、临时根目录）后断言
   `POST /api/pack` 返回的字节与进程内管线**完全相同**、`mode=tw` 生效、
+  `target=zip` 返回的档与 `packToZip()` 逐字节相同、query 里带的扩展源码真的被烘进
+  `project.json`（同一工程不带源码时仍然指向原 URL）、
+  `extensions` 缺 source / 超限 / 不是 JSON 时被拒、非 `.ico` 的图标 400、
+  读不懂的加载页图片 400、
   播放器选项（`turbo`/`autoplay`/`framerate`/`username`/舞台缩放/监视器颜色/云变量…）确实
   传到了渲染层、空 body 返回 400、`/api/inspect` 只解析（不重压、不渲染）、`pack-exe` 只往
   注入的根目录写、窗口尺寸会被夹到合法区间、`exe/build/` 里**上一轮遗留的二进制不会出现在
@@ -429,6 +665,8 @@ pnpm test                 # = node test/run.js，55 项全部在 Node 里跑（�
 
 ```bash
 node bench/ui-check.js --target exe --shot out/ui.png
+node bench/ui-check.js --target zip                     # 静态站点包
+node bench/ui-check.js --image logo.png --extension my-ext.js
 node bench/ui-check.js --site --shot out/site.png     # 纯前端站点，没有服务端
 ```
 
@@ -436,9 +674,16 @@ node bench/ui-check.js --site --shot out/site.png     # 纯前端站点，没有
 塞一个**真实的 sb3 文件**进去，点「载入作品」，等选项出现后点「打包」，
 等页面报完成，然后把**下载链接指向的 blob 大小**读回来，和 `src/pack.js`
 对同一工程写出的字节数比对。`--target exe` 走 exe 那条（切环境单选 → 生成资源 →
-校验 `app.html.gz`），`--shot` 会先撑高视口再截一张**全页**截图。
+校验 `app.html.gz`），`--target zip` 走静态站点包那条（并断言应用设置与「预览」都被藏起来），
+`--shot` 会先撑高视口再截一张**全页**截图。
 `--theme light|dark` 先写 localStorage 再重载，并断言页面 `theme` 属性真的落在请求的
 那一个上 —— 主题是在首帧之前解析的，只靠事后改属性验证不了这条启动路径。
+
+`--image` / `--extension` 走的是**真实的 file input**（`DOM.setFileInputFiles`，一个真文件），
+然后把 `readOptions()` 里的结果和 Node 侧读出来的期望值**逐字节**比对：
+FileReader / `file.text()` 这一段是唯一没有单元测试覆盖的接缝，而它一旦出偏差（编码、丢了
+BOM、读了一半），产物会照样"打包成功"，只是图片显示不出来、扩展加载不上。
+比对之后产物字节仍然要求与 CLI 相同，因为参考产物就是用同一个 data URL / 同一份源码生成的。
 
 `--site` 换成一个**只会发静态文件**的服务（没有 `/api/*`，和 Pages 的行为一致），要求先跑过
 `pnpm build:site`，然后断言三件事：页面确实走了 `window.__BL_LOCAL__` 那条路、
@@ -522,7 +767,7 @@ CI 只有两步：**`build` 构建静态站点，`deploy` 把它发到 Pages**�
 它们仍然存在，只是回到本机跑：
 
 ```bash
-pnpm test            # 55 项：管线、站点构建、浏览器侧编解码器、网页版的 HTTP 端到端
+pnpm test            # 88 项：管线、站点构建、三平台资源、浏览器侧编解码器、网页版的 HTTP 端到端
 pnpm run ui-check    # 真实浏览器里把页面打出来的包与 CLI 的字节比对
 ```
 
@@ -604,8 +849,10 @@ cd exe && ./build.cmd                       # MSVC，产出 exe/build/bl-player.
 ### 6.1 它由什么组成
 
 ```
-exe = 宿主代码(~170 KB) + 资源 RCDATA = gzip(打包好的 HTML) + app.meta
+exe = 宿主代码(~170 KB) + 资源 RCDATA = gzip(打包好的 HTML) + app.meta [ + app.ico + 版本资源 ]
 ```
+
+图标与版本资源是可选的（6.4），不传时资源表与之前一模一样。
 
 构建前需要一次性准备 **WebView2 SDK**（`build.cmd` 期望它在 `exe/sdk/pkg/build/native`）：
 
@@ -679,7 +926,34 @@ Construct 的作者在下面报了同样的问题，他用的是 `deflate`）。
 - **开一个本地 HTTP 服务器**：那样响应会走真正的网络栈，就能白拿 `Content-Encoding: br`。
   但要引入 winsock + 端口管理 + 监听套接字（防火墙/杀软观感差），为 1.2 MiB 不值得。
 
-### 6.4 实测
+### 6.4 图标、版本与窗口模式
+
+```bash
+node src/pack-exe.js x.sb3 --icon app.ico --version 1.2.3 --window-mode maximize
+```
+
+界面里在「运行环境 → EXE → 应用设置」下。三样东西都只落在 `exe/build/` 的资源里，
+宿主代码不需要改（图标是 `main.cpp` 早就在读的 `MAKEINTRESOURCE(1)`）：
+
+| 选项 | 落地方式 |
+|---|---|
+| `--icon app.ico` | 写 `build/app.ico`，`app.rc` 加 `1 ICON "app.ico"`；`main.cpp` 用 `LoadImageW` 分别取大/小两个尺寸（任务栏与标题栏） |
+| `--version 1.2.3` | `app.rc` 生成一个 `VERSIONINFO` 块（`FILEVERSION` / `ProductVersion` / `FileDescription`），Explorer 的属性页里就能看到 |
+| `--window-mode` | `window` / `maximize` / `fullscreen`，写进 `app.meta` 的 `window=`；`main.cpp` 决定首帧是 `SW_SHOW` 还是 `SW_SHOWMAXIMIZED`，`fullscreen` 走和 F11 同一条无边框路径 |
+
+三个约束值得写下来：
+
+- **图标必须是 `.ico`**。`rc.exe` 的 `ICON` 语句不接受 PNG，失败信息也不会提示这一点，
+  所以 `datauri.js` 按 magic 校验，CLI 和服务器都在写盘前拒绝。
+- **`app.rc` 必须保持纯 ASCII**。`rc.exe` 按 OEM 代码页解析它，而标题常常是中文——
+  标题留在 `app.meta`（UTF-8）里，`VERSIONINFO` 里的中文字符会被替换成 `?`。
+  这是有意的：宁可文件属性里难看，也不要 `RC FAILED`。
+  测试里有一条断言盯着「`app.rc` 的每个字节都 < 0x80」。
+- **Esc 的语义固定为「只退出全屏」**（对应上游 `escapeBehavior: 'unfullscreen-only'`）。
+  而且只在窗口**确实处于全屏**时才拦截：其余情况下 Esc 原样交给页面，
+  否则指针锁定和页面自己的弹窗都会失灵。
+
+### 6.5 实测
 
 | 变体 | exe 字节 | 相对 sb3 |
 |---|---|---|
@@ -698,25 +972,159 @@ Construct 的作者在下面报了同样的问题，他用的是 `deflate`）。
 
 - 只支持 **sb3**。sb1/sb2 会在 `loadSb3` 里被明确拒绝，不做静默降级。
 - 不支持 zip64（>4 GB 归档）。
-- 扩展不在打包期内联：产物运行时会通过 `vm.extensionManager.loadExtensionURL` 去拉
-  `extensionURLs` 里的地址（通常是 `extensions.turbowarp.org`）。**离线打开会失败**，
-  这是当前最常见的「打包后打不开」来源。
+- **扩展的源码需要你自己提供。** 打包期不做「自动去 extensions.turbowarp.org 找同名文件」这种事：
+  要么 `--extension` 指定（本地文件，或打包时抓一次的 URL），要么产物照旧联网抓。
+  后者离线打开会失败——这是当前最常见的「打包后打不开」来源，界面会把它标成「仍需联网」的红字，
+  CLI 会打印 `extension! still remote: …`，但仍然不会替你做决定。
+  另外烘进去的是**你给的那份源码**：id 对不上的话，VM 会在加载时报 `Unknown extension`，
+  不会静默用错。
+- 指针锁定 / 手柄 / 特殊云变量行为需要 `vendor/scaffolding-addons.js`（4.3），
+  没有这个文件时那几项会**明确报错**而不是降级。
 - `vendor/` 下的运行时脚本受各自许可证约束，本仓库不分发。
-- 静态站点（4.2）**只能产出 HTML**：exe 要 MSVC 与写盘，浏览器里做不到，所以那个目标在站点上
-  被藏起来、接口回 501。站点的产物比 CLI 大约 **0.5%**（自带 deflate 用的是定长 Huffman），
+- 静态站点（4.2）**只能产出 HTML 和 ZIP**：exe 要 MSVC 与写盘，浏览器里做不到，所以那个目标在
+  站点上被藏起来、接口回 501。站点的产物比 CLI 大约 **0.5%**（自带 deflate 用的是定长 Huffman），
   并且**不默认重压 PNG**。Pages 是公开托管，别把不想公开的作品传上去打包。
+- ZIP 目标（4.5）**必须通过 http(s) 打开**，双击本地文件不行；它也**没有**单文件版那种
+  「一个文件发给别人」的便利。
+- EXE 的 `escapeBehavior` 固定为「只退出全屏」；Electron 的 `packageName` / 无边框窗口 /
+  `backgroundThrottling` 没有对应物（宿主不是 Electron）。
+- macOS / Linux / Android 三个目标**写资源**在任何平台都能做，**编译**只能在对应平台做
+  （`.app` 要 clang + Cocoa/WebKit，ELF 要 GTK3/WebKit2GTK，APK 要 Android SDK）。
+  这三个目标只在 CLI 里有，网页版不提供——理由和 exe 在静态站点上被藏起来是同一条。
+- macOS 的 `.app` 是 **ad-hoc 签名**，只保证在本机（尤其 arm64）能起来；分发要 Developer ID +
+  notarize，不在本仓库范围里（8.3）。
+- Android 的 APK 默认用**当场生成的 debug key** 签名，能装、不能发布；Play 会拒绝 debug 证书（8.3）。
+- Android 的 `--window-mode` 不生效（总是沉浸式全屏），`--orientation` 只对它有意义。
+- 三平台宿主都没有 exe 的 `escapeBehavior` 之外的窗口定制：无边框、后台节流、
+  `packageName` 一律没有。macOS 上也没有 F12（WKWebView 没有公开的打开检查器接口）。
 
-## 8. 目录
+## 8. 打包成 macOS / Linux / Android 的软件
+
+`.exe` 那条路之外，还有三个**原生宿主**，跑的是同一份单文件 HTML：
+
+```bash
+node src/pack-app.js project.sb3 --target macos            # .app / .zip / .dmg
+node src/pack-app.js project.sb3 --target linux   --build  # ELF + .tar.gz
+node src/pack-app.js project.sb3 --target android --build  # .apk
+node src/pack-app.js project.sb3 --target all              # 一次渲染，三个目录
+```
+
+`--target` 是**必填**的：给个默认值等于在用户没说的地方替他选平台。
+`--build` 是可选的、也是唯一需要工具链的一步——和 `pack-exe.js` 一样，资源先落盘，
+编译交给 `hosts/<target>/build.sh`：
+
+|  | macOS | Linux | Android |
+|---|---|---|---|
+| 宿主代码 | ObjC + WKWebView（`hosts/macos/main.m`） | C + GTK3/WebKit2GTK（`hosts/linux/main.c`） | Java + WebView（`hosts/android/java/.../MainActivity.java`） |
+| 载荷位置 | `Contents/Resources/app.html.gz` | `.rodata`（`.incbin`） | `assets/app.html.gz` |
+| 解压 | zlib（SDK 自带） | zlib | `GZIPInputStream` |
+| 工具链 | clang（Xcode / CLT） | gcc + pkg-config + `libwebkit2gtk-4.1-dev` | aapt2 / javac / d8 / zipalign / apksigner |
+| 产物 | `.app` + `.zip` + `.dmg` | `bl-player`（单文件）+ `.tar.gz` | `.apk` |
+| 体积构成 | 宿主 + gzip(html) | 宿主 + gzip(html) | 宿主 + gzip(html) |
+
+### 8.1 三个宿主做的是同一件事
+
+1. **复用 HTML 管线。** 载荷就是 `packToHtml()` 的输出。`test/run.js` 有一条断言盯着
+   「三个目标的 payload 解压后与 CLI 产物**逐字节相同**」——宿主不是另一次转换。
+2. **用平台自己的 gzip 解压。** Windows 那套 JS bootstrap（6.2）在这里不需要：
+   WebView2 不给注入的响应做内容解码，而 zlib / `GZIPInputStream` 是白拿的。
+3. **从 `http://127.0.0.1:<随机端口>/<128 位随机 token>/` 提供页面。** 三个平台共用这条，
+   理由不是省事：打包出来的页面是个**真的 web app**（编译器要 `blob:` worker、声音要
+   AudioWorklet，还有 WebGL 与 localStorage），而自定义 scheme 不是「潜在可信」origin，
+   这些能力在上面会以各种方式失灵。回环 origin 和浏览器给的完全一样，代价是一个**只绑
+   127.0.0.1** 的 socket（不触发防火墙提示，也不对外暴露），token 让同机其它进程读不到页面。
+
+### 8.2 app.meta：三个宿主读的同一份元数据
+
+格式与 exe 的 `app.meta` 一致（`key=value`，UTF-8，一行一个），多了三个键：
+
+```
+target=macos,linux,android   name=我的游戏 Test   id=dev.bilup.my_game
+version=1.2.3                title=我的游戏 Test   width=640  height=480
+gzip=1                       devtools=1           window=fullscreen（可选）
+probe=/abs/path（可选）       orientation=portrait（可选，仅 Android）
+```
+
+两处和 Windows 不一样，都是有意的：
+
+- **标题可以是中文。** `app.rc` 必须纯 ASCII（`rc.exe` 按 OEM 代码页解析），所以 exe 的中文标题
+  只能留在 meta 里；plist / AndroidManifest / `.desktop` 都是 UTF-8，标题照原样写进去。
+- **文件名保留 UTF-8。** `--name` 只去掉任何文件系统都不接受的字符
+  （`/ \ : * ? " < > |` 与控制符），所以中文标题打出来就是 `我的游戏 Test.app`，
+  而不是被转写成一串 ASCII（`slug()` 只用来**造 id**，id 必须 ASCII）。
+
+`--id` 一个值同时当 CFBundleIdentifier 和 Android applicationId 用，两者语法不完全一样
+（Android 不许连字符、不许数字开头），所以它是**归一化**而不是校验后报错：
+`My Game!` → `dev.bilup.my_game`。要精确控制就显式给 `--id com.example.game`。
+
+### 8.3 每个平台各自的取舍
+
+**macOS**
+
+- 产物是 **ad-hoc 签名**的（`codesign -s -`）。arm64 上不签名根本起不来，但**这不等于可分发**：
+  给别人用还要 Developer ID 证书 + notarize，那一步不在本仓库里。
+- **没有 F12。** WKWebView 没有公开的「打开检查器」接口，只有 `inspectable`；
+  `--devtools 1`（默认）会把它打开，然后从 **Safari → 开发 → 你的 app** 附加。
+  Linux 上的 WebKitGTK 有公开接口，所以那边 F12 是真的。
+- `LSMinimumSystemVersion` 是 11.0；`NSAllowsLocalNetworking` 是给回环地址显式开的 ATS 口子。
+- F11 切全屏，Esc 只退出全屏（和 exe 同一条语义），Cmd+Q 退出。
+
+**Linux**
+
+- 需要 **WebKit2GTK 4.1 且 ≥ 2.40**：4.0 没有 `webkit_web_view_evaluate_javascript`，
+  构建脚本在用 `pkg-config --atleast-version` 检查后直接报出版本，而不是链接时报一堆 undefined。
+- 载荷用 `.incbin` 塞进 `.rodata`，所以 `bl-player` 是**真正的单文件**，拷到哪都能跑。
+- `.desktop` 的 `Exec` 固定为 `bl-player`（与 `build.sh` 产出的文件名一致），`Icon` 是应用 id；
+  tar.gz 里是 `bl-player` + `bl-player.desktop` + `share/icons/hicolor/...` 的标准安装布局。
+- 仓库只带一个 256×256 的 PNG，不做多尺寸图标与主题适配。
+
+**Android**
+
+- **不用 Gradle，也不用 androidx。** 宿主只碰 framework 类，所以构建就是
+  `aapt2 → javac → d8 →（把 classes.dex 塞进 apk）→ zipalign → apksigner`，全在 SDK/JDK 里。
+  这样避开 AGP/Gradle/JDK 的版本矩阵，代价是清单与资源由 `src/lib/apps.js` 生成。
+- Activity 类名固定 `dev.bilup.player.MainActivity`，APK 的包名来自 `--id`——
+  一个类在哪个 Java package 与 applicationId 无关，所以一份源码服务所有工程。
+- `android:usesCleartextTraffic="true"` 只为 `127.0.0.1` 那台「服务器」；没有它，
+  API 28+ 的 WebView 会直接 `ERR_CLEARTEXT_NOT_PERMITTED`。
+- 默认签名是**当场生成的 debug key**（能装、不能发）。发布时给四个环境变量：
+  `BL_KEYSTORE` / `BL_KEYSTORE_PASS` / `BL_KEY_PASS` / `BL_KEY_ALIAS`。
+- 屏幕方向由 `--orientation` 决定（默认 `landscape`，Scratch 舞台本来就是 4:3 横的）。
+- `--window-mode` 对 Android 没有意义：手机上不存在「窗口」，它总是沉浸式全屏。
+- `--devtools 1` 打开的是 `chrome://inspect` 那条远程调试通道（要 USB 调试）。
+
+### 8.4 CI 里才真正验证得了
+
+`.github/workflows/hosts.yml` 三个 job，各在一个原生 runner 上跑：
+
+| job | runner | 做什么 |
+|---|---|---|
+| `macos` | `macos-latest` | 构建 `.app`、`codesign -dv`、启动并把活着的 VM 的 `targets/assets/ms` 读回来 |
+| `linux` | `ubuntu-latest` + GTK3/WebKit2GTK + Xvfb | 构建 ELF、在 Xvfb 里启动并同样读回 VM |
+| `android` | `ubuntu-latest` + JDK 17 | 构建、签名、`aapt2 dump badging` / `apksigner verify`，不上模拟器 |
+
+「编译过了」和「跑起来了」不是一回事，所以前两个 job 用 `--probe <file>` 让产物自己证：
+宿主轮询活着的 VM，把 `{targets, assets, canvas, ms}` 写进那个文件再退出。
+Android 没有这一条——一次模拟器启动比这个 workflow 里其它所有步骤加起来还贵，
+APK 装到真机上看才是验证。
+
+三个 job 都把产物作为 artifact 上传（`bl-player.zip`/`.dmg`、ELF+tar.gz、APK），
+下载下来就是可直接安装的东西。
+
+## 9. 目录
 
 ```
 src/lib/        打包器侧（Node）：zip 读写、crc32、base85、PNG 无损重压、
                   sb3 装载与压缩、容器构建、HTML 生成
+                  extensions.js   自定义扩展烘焙（4.4）：包装、id 匹配、改写 projectJSON
+                  datauri.js      图片按内容识别 + 重编码（4.6），加载页/指针/图标共用
+                  extension-source.js  CLI 的 --extension：读本地文件或抓一次 URL
                   deflate.js  bytes.js  md5.js
                   ↑ 浏览器侧的替代实现：同步 DEFLATE 编码器、Buffer 垫片、纯 JS MD5。
                     只在站点构建里替换掉 node:zlib / Buffer / node:crypto，Node 侧不用它们
 src/lib/pipeline.js
-                三个前端共用的管线：prepareProject / inspectProject /
-                  renderProjectHtml / packToHtml / writeExeResources / buildExe
+                三个前端共用的管线：prepareProject（含扩展烘焙）/ inspectProject /
+                  renderProjectHtml / packToHtml / packToZip / writeExeResources / buildExe
 src/site/       静态站点专用的两片胶水：
                   client.js     browser 版 pack/inspect（与 ui/server.js 的映射一致）
                   local-api.js  用 Worker 回答 /api/*，使同一份页面也能在静态托管上跑
@@ -725,20 +1133,29 @@ src/build-site.js
 src/runtime/    会内联进产物、同时能在 Node 里被测的运行时：
                   inflate-raw.js      纯 JS DEFLATE 解码（浏览器兜底）
                   container-reader.js BLPK 读取
-                  loader.js           装载器（fast / tw 两种模式）
-src/pack.js     CLI（-> 单文件 HTML）
+                  loader.js           装载器（fast / tw / http 三种模式）
+src/pack.js     CLI（-> 单文件 HTML，或 --target zip 的静态站点包）
 src/pack-exe.js CLI（-> 单文件 .exe；复用同一条 HTML 管线，两者不会走偏）
+src/pack-app.js CLI（-> macOS .app / Linux ELF / Android .apk 的资源，第 8 节）
+src/lib/apps.js  三平台目标的资源落盘：gzip 载荷 + app.meta + Info.plist /
+                  AndroidManifest / .desktop；包名与文件名归一化、图标容器校验
 ui/             本地网页版（node:http + 一个静态页面，零依赖）
                   index.html  仿 TurboWarp 打包器的界面（卡片式、明暗双主题）
                               —— 站点也用这一份，靠 window.__BL_LOCAL__ 分流
                   server.js   /api/{health,inspect,pack,pack-exe,artifact}
+                              pack 收 target=html|zip，选项走 query string（4.6 说明了为什么）
 site/           构建产物（不进版本库）：index.html / app.js / worker.js / local-api.js
 exe/            WebView2 宿主（C++，MSVC 构建）+ build.cmd
+hosts/          三个原生宿主 + 各自的 build.sh（第 8 节）
+                  macos/main.m   ObjC + WKWebView，回环服务 + zlib
+                  linux/main.c   GTK3/WebKit2GTK，回环服务 + .incbin 载荷
+                  android/java   WebView，回环服务 + GZIPInputStream
 bench/          合成工程生成器（--art 造 canvas 风格位图）+ 无头跑分 + 体积拆解
-                  ui-check.js 无头浏览器里跑通整个网页版流程（--site 跑静态站点）
-test/           验证套件（55 项，含 ui 的 HTTP 端到端、浏览器编解码器与提交规范）
+                  ui-check.js 无头浏览器里跑通整个网页版流程（--site 跑静态站点，
+                              --target html|zip|exe 选产物形态）
+test/           验证套件（88 项，含 ui 的 HTTP 端到端、三平台资源、浏览器编解码器与提交规范）
 .githooks/      commit-msg 钩子 + 提交规范校验器（install.js 由 prepare 自动跑）
 .github/        CI / Release / dependabot
-vendor/         运行时脚本（需自行下载）
+vendor/         运行时脚本（需自行下载：scaffolding-min/full + addons）
 out/            产物（不进版本库）
 ```

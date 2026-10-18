@@ -38,6 +38,9 @@ const SEEDS = [
 const VFS_FILES = [
   'vendor/scaffolding-min.js',
   'vendor/scaffolding-full.js',
+  // Optional: absent means the pointer-lock / gamepad / cloud-behaviour switches
+  // fail at pack time with the same message the CLI gives.
+  'vendor/scaffolding-addons.js',
   'src/runtime/inflate-raw.js',
   'src/runtime/container-reader.js',
   'src/runtime/loader.js'
@@ -275,11 +278,15 @@ self.onmessage = function (event) {
     }
     if (message.kind === 'pack') {
       const packed = self.BLPackager.pack(message.bytes, message.options);
+      // A fresh, exactly-sized buffer: the pipeline's own may be a view into a
+      // pooled allocation, and transferring that would drag the pool along.
+      const output = new Uint8Array(packed.output).buffer;
       self.postMessage({id: message.id, ok: true, result: {
         name: packed.name,
+        mime: packed.mime,
         stats: packed.stats,
-        html: packed.html.buffer
-      }}, [packed.html.buffer]);
+        output: output
+      }}, [output]);
       return;
     }
     throw new Error('unknown message ' + message.kind);
@@ -299,7 +306,8 @@ self.onmessage = function (event) {
     throw new Error('ui/index.html is missing the <!-- BL:SITE --> marker');
   }
   const injected = [
-    `<script>window.__BL_SITE__ = true; window.__BL_VERSION__ = ${JSON.stringify(version)};</script>`,
+    `<script>window.__BL_SITE__ = true; window.__BL_VERSION__ = ${JSON.stringify(version)};` +
+      `window.__BL_ADDONS__ = ${Object.prototype.hasOwnProperty.call(vfs, 'scaffolding-addons.js')};</script>`,
     '<script src="local-api.js"></script>',
     // The exe target needs MSVC and a file system; the site has neither, and an
     // option that cannot work is worse than an absent one.

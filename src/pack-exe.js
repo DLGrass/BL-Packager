@@ -28,8 +28,12 @@ const {
   writeExeResources,
   buildExe,
   readBuiltExe,
-  loadOptionSet
+  resolveIcon,
+  resolveImage,
+  loadOptionSet,
+  WINDOW_MODES
 } = require('./lib/pipeline');
+const {collectExtensions} = require('./lib/extension-source');
 
 const USAGE = `
 Usage: node src/pack-exe.js <project.sb3> [options]
@@ -39,9 +43,16 @@ Options:
       --title <text>     window title           (default: derived from the file name)
       --width <n>        window width           (default: 640)
       --height <n>       window height          (default: 480)
+      --window-mode <m>  window | maximize | fullscreen      (default: window)
+      --icon <file.ico>  application icon (Explorer, title bar, taskbar)
+      --version <x.y.z>  file version shown in the exe's properties
       --options <spec>   JSON of the runtime/player options, or @file.json
                          (the shape the web UI's 导出 button writes) — an exe is
                          the same page in a WebView, so it takes the same ones
+      --extension <spec> bake a custom extension in (a .js path or a URL);
+                         repeatable, same as in src/pack.js
+      --loading-image <f>, --cursor-image <f>, --pointerlock, --gamepad, …
+                         see "node src/pack.js --help"
       --preload          warm compressed assets in parallel (see README)
       --no-deflate       store every container entry raw
       --no-optimize-png  keep PNG assets exactly as stored in the sb3. By
@@ -79,7 +90,21 @@ const parseArgs = (argv) => {
       case '--title': options.title = next(); break;
       case '--width': options.width = Number(next()); break;
       case '--height': options.height = Number(next()); break;
+      case '--window-mode': options.windowMode = next(); break;
+      case '--icon': options.icon = next(); break;
+      case '--version': options.version = next(); break;
       case '--options': options.options = next(); break;
+      case '--extension':
+        (options.extensions = options.extensions || []).push(next());
+        break;
+      case '--loading-image': options.loadingImage = next(); break;
+      case '--loading-image-mode': options.loadingImageMode = next(); break;
+      case '--cursor-image': options.cursorImage = next(); break;
+      case '--cursor-center': options.cursorCenter = next(); break;
+      case '--pointerlock': options.pointerlock = true; break;
+      case '--gamepad': options.gamepad = true; break;
+      case '--special-cloud-behaviors': options.specialCloudBehaviors = true; break;
+      case '--unsafe-cloud-behaviors': options.unsafeCloudBehaviors = true; break;
       case '--preload': options.preload = true; break;
       case '--no-deflate': options.noDeflate = true; break;
       case '--no-optimize-png': options.noOptimizePng = true; break;
@@ -98,7 +123,7 @@ const parseArgs = (argv) => {
   return options;
 };
 
-const run = () => {
+const run = async () => {
   const options = parseArgs(process.argv.slice(2));
   if (options.help || options.positional.length === 0) {
     console.log(USAGE);
@@ -110,20 +135,43 @@ const run = () => {
   const optionSet = loadOptionSet(options.options);
   const title = options.title || optionSet.title || defaultTitle(inputPath);
 
+  const windowMode = options.windowMode || optionSet.windowMode || 'window';
+  if (!WINDOW_MODES.includes(windowMode)) {
+    throw new Error(`unknown --window-mode ${windowMode} (window | maximize | fullscreen)`);
+  }
+
+  const extensions = await collectExtensions(optionSet, options.extensions || []);
+
   // --- 1 + 2. HTML payload, compressed -------------------------------------
-  const {pack, htmlBytes, payload, gzipped, paths} = writeExeResources(input, Object.assign({}, optionSet, {
+  const {pack, htmlBytes, payload, gzipped, icon, paths} = writeExeResources(input, Object.assign({}, optionSet, {
     inputPath,
     title,
     width: options.width || 640,
     height: options.height || 480,
+    windowMode,
+    icon: resolveIcon(options.icon || optionSet.icon),
+    version: options.version || optionSet.version || '',
+    extensions,
+    loadingImage: resolveImage(options.loadingImage || optionSet.loadingImage, 'loading image'),
+    cursorCustom: resolveImage(options.cursorImage || optionSet.cursorCustom, 'cursor image'),
     gzip: !options.noGzip,
     gzipLevel: options.gzipLevel || 9,
     devtools: options.devtools !== false,
     probe: options.probe || null,
     preload: options.preload === undefined ? !!optionSet.preload : !!options.preload,
     noDeflate: options.noDeflate === undefined ? !!optionSet.noDeflate : !!options.noDeflate,
-    optimizePng: options.noOptimizePng ? false : optionSet.optimizePng !== false
-  }));
+    optimizePng: options.noOptimizePng ? false : optionSet.optimizePng !== false,
+    // Flags only beat the option set when they were actually given.
+    ...(options.loadingImageMode ? {loadingImageMode: options.loadingImageMode} : {}),
+    ...(options.pointerlock ? {pointerlock: true} : {}),
+    ...(options.gamepad ? {gamepad: true} : {}),
+    ...(options.specialCloudBehaviors ? {specialCloudBehaviors: true} : {}),
+    ...(options.unsafeCloudBehaviors ? {unsafeCloudBehaviors: true} : {})
+  }, (() => {
+    if (!options.cursorCenter) return {};
+    const [x, y = 0] = String(options.cursorCenter).split(',');
+    return {cursorCenterX: Number(x) || 0, cursorCenterY: Number(y) || 0};
+  })()));
 
   // --- 3. build ------------------------------------------------------------
   // Opt-in: some sandboxes block spawning cmd.exe from Node. Running
@@ -148,6 +196,9 @@ const run = () => {
   const report = {
     input: inputPath,
     title,
+    windowMode,
+    icon: icon ? icon.name : null,
+    version: options.version || optionSet.version || null,
     project: pack.project.analysis,
     container: pack.containerStats,
     scaffolding: path.basename(pack.scaffoldingSource),
@@ -179,9 +230,14 @@ const run = () => {
     console.log(`png         ${analysis.png.optimized} re-encoded losslessly, ` +
       `${human(analysis.png.before)} -> ${human(analysis.png.after)} (saved ${human(analysis.png.before - analysis.png.after)})`);
   }
+  for (const baked of (analysis.bakedExtensions || [])) {
+    console.log(`extension   ${baked.name} -> ${baked.id || '(eager)'} [${baked.how}]`);
+  }
   console.log(`runtime     ${path.basename(pack.scaffoldingSource)}`);
   console.log(`container   payload ${human(pack.containerStats.payloadBytes)}` +
     ` (${pack.containerStats.assetsDeflated} deflated / ${pack.containerStats.assetsRaw} raw)`);
+  if (icon) console.log(`icon        ${icon.name} (${human(icon.bytes.length)})`);
+  if (windowMode !== 'window') console.log(`window      ${windowMode}`);
   console.log('');
   console.log(`html        ${human(htmlBytes.length)}`);
   console.log(`resource    ${human(payload.length)}${gzipped ? ` (gzip -${options.gzipLevel || 9})` : ' (uncompressed)'}`);
@@ -195,10 +251,8 @@ const run = () => {
   }
 };
 
-try {
-  run();
-} catch (error) {
+run().catch((error) => {
   console.error(`error: ${error.message}`);
   if (process.env.DEBUG) console.error(error.stack);
   process.exit(1);
-}
+});

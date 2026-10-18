@@ -46,29 +46,56 @@ const createClient = (deps) => {
    * The packing step. Same option mapping as ui/server.js's handlePack, so a
    * project packed here and the same project packed by the CLI differ only in
    * what the encoder can do (see README: the browser brings its own deflate).
+   *
+   * Returns the bytes and their MIME type rather than an html string, because
+   * there are now two shapes of output: a page, and a zip that has to be served.
    */
   const pack = (bytes, options = {}) => {
     const started = Date.now();
     const title = options.title || '';
+    const target = options.target === 'zip' ? 'zip' : 'html';
     const mode = options.mode === 'tw' ? 'tw' : 'fast';
+    const extensions = Array.isArray(options.extensions) ? options.extensions : [];
+    const resolvedTitle = safeFileName(title || pipeline.defaultTitle(options.filename || ''));
 
-    const packed = pipeline.packToHtml(bytes, Object.assign({
-      mode,
+    const common = Object.assign({
       inputPath: options.filename || '',
       title,
+      extensions,
       preload: !!options.preload,
       noDeflate: !!options.noDeflate,
       optimizePng: options.optimizePng !== false,
       onWarn: () => {}
-    }, pipeline.pickRenderOptions(options)));
+    }, pipeline.pickRenderOptions(options));
 
-    const resolvedTitle = safeFileName(title || pipeline.defaultTitle(options.filename || ''));
+    if (target === 'zip') {
+      const zipped = pipeline.packToZip(bytes, common);
+      return {
+        ok: true,
+        name: `${resolvedTitle}.zip`,
+        mime: 'application/zip',
+        output: zipped.zip,
+        stats: {
+          title: title || pipeline.defaultTitle(options.filename || ''),
+          target,
+          zipBytes: zipped.zip.length,
+          htmlBytes: zipped.html.length,
+          entries: zipped.entries.length,
+          scaffolding: basenameOf(zipped.scaffoldingSource),
+          project: zipped.project.analysis,
+          ms: Date.now() - started
+        }
+      };
+    }
+
+    const packed = pipeline.packToHtml(bytes, Object.assign({mode}, common));
     const name = mode === 'tw' ? `${resolvedTitle}.tw.html` : `${resolvedTitle}.html`;
 
     return {
       ok: true,
       name,
-      html: packed.html,
+      mime: 'text/html; charset=utf-8',
+      output: packed.html,
       stats: {
         title: title || pipeline.defaultTitle(options.filename || ''),
         mode,

@@ -4,8 +4,12 @@
 //
 //   node bench/ui-check.js                                   # out/bench/bench.sb3, HTML
 //   node bench/ui-check.js --target exe                      # the exe resource path
+//   node bench/ui-check.js --target zip                      # the static-site archive
 //   node bench/ui-check.js --sb3 out/bench/bench.sb3 --shot out/ui.png
 //   node bench/ui-check.js --theme dark --shot out/ui-dark.png
+//   node bench/ui-check.js --image logo.png                  # loading-screen image through
+//                                                            # the real file input
+//   node bench/ui-check.js --extension my-ext.js             # ditto for a baked extension
 //   node bench/ui-check.js --site --shot out/site.png        # the static site
 //
 // test/run.js covers the HTTP API but stops at the socket: it cannot tell
@@ -33,7 +37,8 @@ const {spawn} = require('node:child_process');
 
 const ROOT = path.join(__dirname, '..');
 const {createServer, listen} = require('../ui/server');
-const {packToHtml} = require('../src/lib/pipeline');
+const {packToHtml, packToZip} = require('../src/lib/pipeline');
+const {imageDataUri} = require('../src/lib/datauri');
 
 const BROWSER_CANDIDATES = [
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -176,27 +181,32 @@ const CONTROL_IDS = [
   'removeFencing', 'removeMiscLimits', 'username', 'closeWhenStopped',
   'stageWidth', 'stageHeight',
   // 展示选项
-  'title', 'progressBar', 'loadingText', 'autoplay',
+  'title', 'progressBar', 'loadingText', 'loadingImageInput', 'autoplay',
   'controlGreenFlag', 'controlStopAll', 'controlPause', 'controlFullscreen',
   'background', 'foreground', 'accent',
   'editableLists', 'variableColor', 'listColor',
+  // 输入
+  'cursorImageInput', 'cursorCenterX', 'cursorCenterY', 'pointerlock', 'gamepad',
   // 云变量
-  'projectId',
+  'projectId', 'specialCloudBehaviors', 'unsafeCloudBehaviors',
   // 高级选项
   'compilerEnabled', 'warpTimer', 'customCSS', 'customJS', 'packagedRuntime', 'bigTexture',
+  // 自定义扩展
+  'extensionInput',
   // 本打包器专用
   'mode', 'optimizePng', 'noDeflate', 'preload',
   // 运行环境 / 应用设置
-  'width', 'height', 'devtools', 'build'
+  'width', 'height', 'windowMode', 'iconInput', 'appVersion', 'devtools', 'build'
 ];
 
-const RADIO_NAMES = ['target', 'resizeMode', 'cursor', 'cloudMode'];
+const RADIO_NAMES = ['target', 'resizeMode', 'cursor', 'cloudMode', 'loadingImageMode'];
 
 const main = async () => {
   const sb3Path = path.resolve(arg('--sb3', path.join(ROOT, 'out', 'bench', 'bench.sb3')));
   const shotPath = arg('--shot', null);
   const theme = arg('--theme', null);
-  const target = arg('--target', 'html') === 'exe' ? 'exe' : 'html';
+  const requested = arg('--target', 'html');
+  const target = requested === 'exe' || requested === 'zip' ? requested : 'html';
   const siteMode = argv.includes('--site');
   if (siteMode && target === 'exe') throw new Error('--site has no exe target: the site hides it on purpose');
   if (!fs.existsSync(sb3Path)) {
@@ -209,20 +219,42 @@ const main = async () => {
   // What the CLI would produce for this project with the UI's defaults. For the
   // exe target the artifact the page offers is the gzipped resource, not the HTML.
   // The site defaults PNG recompression off, so the reference has to match.
-  const expectedHtml = packToHtml(sb3, {
+  //
+  // `--image` is part of the reference on purpose: the page reads that file with
+  // FileReader, which is the one hop no unit test can cover, so the run only
+  // stays comparable if the reference embeds the very same data URL.
+  const imagePath = arg('--image', null);
+  const imageUri = imagePath
+    ? imageDataUri(fs.readFileSync(path.resolve(imagePath)), path.basename(imagePath))
+    : '';
+  // Same argument for a baked extension: the page reads the file with text(),
+  // forwards it as JSON in the query string, and the server re-checks it.
+  const extensionPath = arg('--extension', null);
+  const extensionSource = extensionPath ? fs.readFileSync(path.resolve(extensionPath), 'utf8') : '';
+  const extensionEntries = extensionSource
+    ? [{name: path.basename(extensionPath), source: extensionSource}]
+    : [];
+  const referenceOptions = {
     mode: 'fast',
     inputPath: fileName,
-    optimizePng: siteMode ? false : true
-  }).html;
+    optimizePng: siteMode ? false : true,
+    ...(imageUri ? {loadingImage: imageUri} : {}),
+    ...(extensionEntries.length ? {extensions: extensionEntries} : {})
+  };
+  const expectedHtml = packToHtml(sb3, referenceOptions).html;
   const expectedBytes = target === 'exe'
     ? zlib.gzipSync(expectedHtml, {level: 9}).length
-    : expectedHtml.length;
+    : target === 'zip'
+      ? packToZip(sb3, referenceOptions).zip.length
+      : expectedHtml.length;
   // Without --build the page cannot offer an exe, so the first download is the
   // resource itself. Match it by name rather than by position. The links live on
   // the status line (`#downloads`), not in a result card.
   const artifactSelector = target === 'exe'
     ? '#downloads a[download="app.html.gz"]'
-    : '#downloads a[download]';
+    : target === 'zip'
+      ? '#downloads a[download$=".zip"]'
+      : '#downloads a[download]';
 
   if (siteMode && !fs.existsSync(path.join(ROOT, 'site', 'app.js'))) {
     throw new Error('site/app.js is missing — run: node src/build-site.js');
@@ -428,17 +460,68 @@ const main = async () => {
     console.log(`page        loaded, title field "${armed.title}"`);
     console.log(`project     ${await readText('#projectStats')}`);
 
-    if (target === 'exe') {
-      await cdp.evaluate(`document.querySelector('input[name="target"][value="exe"]').click()`);
+    if (imageUri) {
+      const imageNode = await findNode('#loadingImageInput');
+      await cdp.send('DOM.setFileInputFiles', {files: [path.resolve(imagePath)], nodeId: imageNode});
+      let chosen = '';
+      for (let i = 0; i < 30 && !chosen; i++) {
+        await sleep(120);
+        chosen = await cdp.evaluate(`readOptions().loadingImage || ''`);
+      }
+      // Byte-for-byte, not "starts with": the reference artifact above was built
+      // from the same data URL, so anything else means the browser read the file
+      // differently from Node — which is exactly the bug worth catching.
+      if (chosen !== imageUri) {
+        throw new Error(`FileReader produced a different data URL ` +
+          `(${chosen.slice(0, 40)}… vs ${imageUri.slice(0, 40)}…)`);
+      }
+      const note = await cdp.evaluate(`document.getElementById('loadingImageNote').textContent`);
+      if (!note.includes('已选择')) throw new Error(`the page did not acknowledge the image: ${note}`);
+      console.log(`page        loading image -> ${chosen.slice(0, 32)}… (${note})`);
+    }
+
+    if (extensionEntries.length) {
+      const node = await findNode('#extensionInput');
+      await cdp.send('DOM.setFileInputFiles', {files: [path.resolve(extensionPath)], nodeId: node});
+      let forwarded = null;
+      for (let i = 0; i < 30 && !forwarded; i++) {
+        await sleep(120);
+        forwarded = JSON.parse(await cdp.evaluate(`JSON.stringify(
+          (readOptions().extensions || []).length ? readOptions().extensions : null)`));
+      }
+      if (!forwarded || forwarded.length !== 1) {
+        throw new Error(`the extension never reached readOptions(): ${JSON.stringify(forwarded)}`);
+      }
+      if (forwarded[0].source !== extensionSource) {
+        throw new Error('the extension source the page forwards differs from the file on disk');
+      }
+      const listed = await cdp.evaluate(`document.getElementById('extensionList').innerText`);
+      if (!listed.includes(extensionEntries[0].name)) {
+        throw new Error(`the extension list does not show the file: ${listed}`);
+      }
+      console.log(`page        extension -> ${forwarded[0].name} (${extensionSource.length} bytes, listed)`);
+    }
+
+    if (target === 'exe' || target === 'zip') {
+      await cdp.evaluate(`document.querySelector('input[name="target"][value="${target}"]').click()`);
       await sleep(400);
       const tab = JSON.parse(await cdp.evaluate(`JSON.stringify({
         target: document.querySelector('input[name="target"]:checked').value,
         appSettings: !document.getElementById('appSettings').classList.contains('hidden'),
-        previewHidden: document.getElementById('previewBtn').classList.contains('hidden')
+        previewHidden: document.getElementById('previewBtn').classList.contains('hidden'),
+        note: document.getElementById('targetNote').textContent
       })`));
       console.log(`page        target -> ${tab.target}, 应用设置 visible: ${tab.appSettings}, 预览 hidden: ${tab.previewHidden}`);
-      if (tab.target !== 'exe' || !tab.appSettings) {
-        throw new Error(`selecting the EXE environment did not take effect: ${JSON.stringify(tab)}`);
+      if (tab.target !== target) {
+        throw new Error(`selecting the ${target} environment did not take effect: ${JSON.stringify(tab)}`);
+      }
+      if (target === 'exe' && !tab.appSettings) {
+        throw new Error(`the exe target did not reveal its application settings: ${JSON.stringify(tab)}`);
+      }
+      // A zip is a folder-shaped artifact: no app settings, and nothing a tab
+      // could run, so 预览 must be gone in both cases.
+      if (target === 'zip' && (tab.appSettings || !tab.previewHidden)) {
+        throw new Error(`the zip target should hide the app settings and 预览: ${JSON.stringify(tab)}`);
       }
     }
 

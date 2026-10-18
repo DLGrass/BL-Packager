@@ -5,12 +5,16 @@
 // whole loader including the native inflate path is testable without a browser),
 // and it is inlined verbatim into the produced HTML.
 //
-// Two modes:
+// Three modes:
 //
 //   'tw'   TurboWarp's own strategy: hand the raw .sb3 bytes to
 //          Scaffolding.JSZip and let it unpack them, looking assets up by name
 //          and inflating them with its pure-JS inflater as the VM asks for them.
 //          Kept as the reference implementation for A/B measurement.
+//
+//   'http' The zip target: fetch project.json and assets/<md5ext> from beside
+//          the page. Nothing is embedded, so the browser parallelises the
+//          fetches and caches them between visits.
 //
 //   'fast' Open a BLPK container: one index parse, O(1) asset lookup, no zip
 //          central directory, no zip entry objects, and no JS inflate for the
@@ -72,7 +76,7 @@ const localOpenBlpk = () => {
  * @returns {{getProjectData: () => Promise<ArrayBuffer|Uint8Array>, warmUp: () => any, stats: () => object, assetLoads: () => number}}
  */
 const createProjectSource = (config) => {
-  const mode = config.mode === 'tw' ? 'tw' : 'fast';
+  const mode = config.mode === 'tw' || config.mode === 'http' ? config.mode : 'fast';
   const storage = config.storage;
   const vm = config.vm;
   const takePayload = config.takePayload;
@@ -159,6 +163,48 @@ const createProjectSource = (config) => {
         return warm;
       },
       stats,
+      assetLoads: () => assetLoads
+    };
+  }
+
+  // ---------------------------------------------------------------- http ---
+  // The zip target: index.html sits next to project.json and assets/, and the
+  // browser fetches each one as the VM asks for it. No base85, no container, no
+  // decompression — the point is that the web server already compresses on the
+  // wire, the fetches overlap, and the HTTP cache makes a second visit cheap.
+  // It only works over http(s): `file://` has no directory listing for fetch.
+  if (mode === 'http') {
+    const base = config.assetBase === undefined ? 'assets/' : String(config.assetBase);
+    const fetchFn = config.fetch || ((url) => fetch(url));
+
+    storage.addHelper({
+      load: (assetType, assetId, dataFormat) => {
+        assetLoads++;
+        const name = assetId + '.' + dataFormat;
+        return fetchFn(base + name).then((response) => {
+          if (!response || !response.ok) {
+            console.error('Asset is not next to the page: ' + name);
+            return null;
+          }
+          return response.arrayBuffer();
+        }).then((buffer) => {
+          if (!buffer) return null;
+          return storage.createAsset(assetType, dataFormat, new Uint8Array(buffer), assetId);
+        });
+      }
+    });
+
+    return {
+      getProjectData: () => fetchFn('project.json').then((response) => {
+        if (!response || !response.ok) {
+          throw new Error('project.json is not next to index.html' +
+            (response ? ' (HTTP ' + response.status + ')' : '') +
+            ' — the zip has to be served over http(s), not opened from disk');
+        }
+        return response.arrayBuffer();
+      }),
+      warmUp: () => null,
+      stats: () => ({mode: 'http', assetLoads, base}),
       assetLoads: () => assetLoads
     };
   }

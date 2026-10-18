@@ -19,6 +19,10 @@ const {spawnSync} = require('node:child_process');
 const {loadSb3} = require('./sb3');
 const {buildContainer} = require('./container');
 const {renderHtml} = require('./html');
+const {applyBakedExtensions} = require('./extensions');
+const {parseDataUri, imageDataUri, sniffImage} = require('./datauri');
+const {writeZip} = require('./zip');
+const {basename} = require('./container');
 
 const ROOT = path.join(__dirname, '..', '..');
 const EXE_DIR = path.join(ROOT, 'exe');
@@ -32,6 +36,10 @@ const MIN_SAVING_OFF = 2;
 
 const SCAFFOLDING_FULL = 'scaffolding-full.js';
 const SCAFFOLDING_MIN = 'scaffolding-min.js';
+const SCAFFOLDING_ADDONS = 'scaffolding-addons.js';
+
+/** Largest loading-screen image / cursor accepted, before base64 inflation. */
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 
 /**
  * Options that travel straight from a front end to the rendered page. Each one
@@ -47,10 +55,17 @@ const RENDER_OPTION_KEYS = [
   'cloudMode', 'projectId',
   // player
   'accent', 'background', 'foreground', 'loadingText', 'progressBar',
+  'loadingImage', 'loadingImageMode',
   'controlGreenFlag', 'controlStopAll', 'controlPause', 'controlFullscreen',
   'editableLists', 'variableColor', 'listColor', 'packagedRuntime',
-  'customCSS', 'customJS'
+  'customCSS', 'customJS',
+  // interaction
+  'cursorCustom', 'cursorCenterX', 'cursorCenterY',
+  'pointerlock', 'gamepad', 'specialCloudBehaviors', 'unsafeCloudBehaviors'
 ];
+
+/** The addon bundle has to be inlined when any of these is on. */
+const ADDON_KEYS = ['pointerlock', 'gamepad', 'specialCloudBehaviors', 'unsafeCloudBehaviors'];
 
 /** Only the keys the caller actually supplied — undefined must not win. */
 const pickRenderOptions = (source = {}) => {
@@ -139,15 +154,99 @@ const pickScaffolding = (project, options = {}) => {
 };
 
 /**
- * Stage 1: parse the sb3, pick the runtime, build the container.
+ * Resolve the addon bundle, the way pickScaffolding resolves the runtime.
+ *
+ * The distinction between "needed" and "nice to have" is deliberate:
+ * pointer lock, gamepad and the special cloud behaviours exist *only* in this
+ * bundle, so asking for one without it is an error. The pause button works
+ * without it too — it just keeps the vanilla pause — so a missing bundle there
+ * must not turn a working setup into a failed pack.
+ */
+const pickAddons = (root, renderOptions = {}) => {
+  const file = path.join(root, 'vendor', SCAFFOLDING_ADDONS);
+  const present = fs.existsSync(file);
+  const required = ADDON_KEYS.filter((key) => renderOptions[key]);
+  if (required.length > 0) {
+    if (!present) {
+      throw new Error(`the ${required.join(' / ')} option needs vendor/${SCAFFOLDING_ADDONS}, ` +
+        'which is not in this checkout. Download it into vendor/:\n' +
+        '  https://packager.turbowarp.org/scaffolding/addons.js');
+    }
+    return file;
+  }
+  return present && renderOptions.controlPause ? file : null;
+};
+
+/** @returns {string} a data: URL, or '' when no file was given */
+const readImageFile = (file, label = 'image') => {
+  if (!file) return '';
+  const absolute = path.resolve(file);
+  const bytes = fs.readFileSync(absolute);
+  if (bytes.length > MAX_IMAGE_BYTES) {
+    throw new Error(`${label} ${path.basename(absolute)} is ${human(bytes.length)}; ` +
+      `the limit is ${human(MAX_IMAGE_BYTES)}`);
+  }
+  return imageDataUri(bytes, `${label} ${path.basename(absolute)}`);
+};
+
+/** The exe icon has to be a real .ico (rc.exe's ICON statement is literal). */
+const readIconFile = (file) => {
+  if (!file) return null;
+  const absolute = path.resolve(file);
+  const bytes = fs.readFileSync(absolute);
+  if (sniffImage(bytes) !== 'ico') {
+    throw new Error(`icon ${path.basename(absolute)} is not a .ico file ` +
+      '(png/jpeg are not accepted: Windows wants an icon container)');
+  }
+  return {name: path.basename(absolute), bytes};
+};
+
+/**
+ * The same two shapes as resolveImage(), for the icon: a path from a flag or a
+ * hand-written options file, or the data URL the web UI exports.
+ */
+const resolveIcon = (value) => {
+  if (!value) return null;
+  const text = String(value);
+  if (/^data:/i.test(text)) {
+    const parsed = parseDataUri(text);
+    if (!parsed) throw new Error('icon is not a valid data: URL');
+    if (parsed.bytes.length > MAX_IMAGE_BYTES) {
+      throw new Error(`icon is ${human(parsed.bytes.length)}; the limit is ${human(MAX_IMAGE_BYTES)}`);
+    }
+    if (sniffImage(parsed.bytes) !== 'ico') {
+      throw new Error('icon is not a .ico file (Windows wants an icon container)');
+    }
+    return {name: 'app.ico', bytes: parsed.bytes};
+  }
+  return readIconFile(text);
+};
+
+/**
+ * An image option may hold either shape: a `data:` URL (what the web UI has, and
+ * what the renderer demands) or a path (what a hand-written options file or a
+ * CLI flag naturally contains). One function decides, so neither front end has
+ * to know about the other.
+ */
+const resolveImage = (value, label = 'image') => {
+  if (!value) return '';
+  const text = String(value);
+  if (/^data:image\//i.test(text)) return text;
+  return readImageFile(text, label);
+};
+
+/**
+ * Stage 1: parse the sb3, bake any supplied extensions in, pick the runtime,
+ * build the container.
  *
  * Split out from rendering because `--mode=both` renders two artifacts from one
  * parse — and because the web UI wants to show the analysis before it commits to
  * emitting a 19 MB file.
  *
  * @param {Buffer|Uint8Array} input raw sb3
+ * @param {{extensions?: {name?: string, source: string}[]}} [options]
  * @returns {{project: object, container: Buffer, containerStats: object,
- *            scaffoldingSource: string}}
+ *            scaffoldingSource: string, extensions: object}}
  */
 const prepareProject = (input, options = {}) => {
   const {
@@ -157,10 +256,14 @@ const prepareProject = (input, options = {}) => {
     deflateIndex = false,
     optimizePng = true,
     root = ROOT,
+    extensions = [],
     onWarn = () => {}
   } = options;
 
   const project = loadSb3(input, {optimize: true, optimizePng});
+  // Before the container is built: the rewrite lands in project.json, which is
+  // what both the container and the zip target ship.
+  const baked = applyBakedExtensions(project, extensions, {onWarn});
   const scaffoldingSource = scaffolding || pickScaffolding(project, {fullRuntime, root, onWarn});
 
   const {container, stats: containerStats} = buildContainer(project, {
@@ -168,7 +271,7 @@ const prepareProject = (input, options = {}) => {
     deflateIndex
   });
 
-  return {project, container, containerStats, scaffoldingSource};
+  return {project, container, containerStats, scaffoldingSource, extensions: baked};
 };
 
 /**
@@ -218,7 +321,8 @@ const inspectProject = (input, options = {}) => {
  *
  * @param {object} prepared result of prepareProject()
  * @param {object} [options]
- * @param {'fast'|'tw'} [options.mode] fast = BLPK container, tw = upstream strategy
+ * @param {'fast'|'tw'|'http'} [options.mode] fast = BLPK container, tw =
+ *        upstream strategy, http = no payload (the zip target)
  * @param {string} [options.inputPath] used only to derive the default title
  * @returns {{html: Buffer, stats: object, payloadBytes: number, deflatedEntries: number}}
  */
@@ -231,6 +335,7 @@ const renderProjectHtml = (prepared, options = {}) => {
     turbo = false,
     framerate = 30,
     preload = false,
+    root = ROOT,
     // Handing the VM views into the decoded container is a documented
     // regression (scratch-audio then copies the whole thing per sound). It is
     // reachable from the CLI on purpose, to reproduce the measurement.
@@ -238,11 +343,14 @@ const renderProjectHtml = (prepared, options = {}) => {
     instrument = false
   } = options;
 
-  if (mode !== 'fast' && mode !== 'tw') throw new Error(`unknown mode ${mode}`);
+  if (mode !== 'fast' && mode !== 'tw' && mode !== 'http') throw new Error(`unknown mode ${mode}`);
 
   const {project, container, containerStats, scaffoldingSource} = prepared;
-  const payload = mode === 'tw' ? project.originalBytes : container;
-  const deflatedEntries = mode === 'tw'
+  const renderOptions = pickRenderOptions(options);
+  const payload = mode === 'http'
+    ? null
+    : (mode === 'tw' ? project.originalBytes : container);
+  const deflatedEntries = mode === 'tw' || mode === 'http'
     ? 0
     : (containerStats.assetsDeflated + (containerStats.indexDeflated ? 1 : 0));
 
@@ -257,10 +365,12 @@ const renderProjectHtml = (prepared, options = {}) => {
     instrument,
     deflatedEntries,
     scaffoldingSource,
+    addonsSource: pickAddons(root, renderOptions),
+    eagerExtensions: prepared.extensions ? prepared.extensions.eager : [],
     buildInfo: `runtime: ${path.basename(scaffoldingSource)}`
-  }, pickRenderOptions(options)));
+  }, renderOptions));
 
-  return {html, stats, payloadBytes: payload.length, deflatedEntries};
+  return {html, stats, payloadBytes: payload ? payload.length : 0, deflatedEntries};
 };
 
 /**
@@ -277,18 +387,103 @@ const packToHtml = (input, options = {}) => {
   return Object.assign({}, prepared, rendered);
 };
 
+/**
+ * sb3 bytes -> a zip for a static host: `index.html`, `project.json`, `assets/`.
+ *
+ * This is upstream's "zip" target, and it is the one target where inlining is
+ * the wrong answer: with the assets as separate files the browser fetches them
+ * in parallel while the VM is still building targets, and caches each one, so a
+ * second visit only re-reads the HTML. The trade is that the page has to be
+ * *served* — `file://` gives fetch no directory to read from, and the error
+ * message in loader.js says so instead of hanging.
+ *
+ * @returns {{zip: Buffer, entries: object[], html: Buffer, stats: object,
+ *            project: object, containerStats: object, scaffoldingSource: string}}
+ */
+const packToZip = (input, options = {}) => {
+  const prepared = prepareProject(input, options);
+  const rendered = renderProjectHtml(prepared, Object.assign({}, options, {mode: 'http'}));
+
+  const entries = [
+    {name: 'index.html', data: rendered.html},
+    {name: 'project.json', data: prepared.project.projectJSONBytes}
+  ];
+  for (const [name, data] of prepared.project.assets) {
+    // Flattened on purpose: the VM only ever asks for `<md5ext>`, so a
+    // subdirectory in the original sb3 is not information worth keeping.
+    entries.push({name: `assets/${basename(name)}`, data});
+  }
+
+  return Object.assign({}, prepared, rendered, {zip: writeZip(entries), entries});
+};
+
 /** `=` and newlines would corrupt the key/value file the host parses. */
 const metaValue = (value) => String(value).replace(/[\r\n]+/g, ' ').replace(/^\s*|\s*$/g, '');
 
+const WINDOW_MODES = ['window', 'maximize', 'fullscreen'];
+
+/**
+ * A VERSIONINFO block for app.rc, so the exe shows a product name and version in
+ * Explorer instead of "unknown application".
+ *
+ * Everything here has to be ASCII: rc.exe parses the script in the OEM code
+ * page, which is exactly why the document title lives in app.meta (read as
+ * UTF-8) instead. So a Chinese title becomes `?` characters *in the file
+ * properties only* — the window title, which comes from the meta file, keeps it.
+ */
+const rcVersionBlock = (version, title) => {
+  const ascii = (value) => String(value == null ? '' : value).replace(/[^\x20-\x7e]/g, '?');
+  const parts = ascii(version).split('.').map((part) => parseInt(part, 10));
+  const quad = [];
+  for (let i = 0; i < 4; i++) {
+    quad.push(Number.isFinite(parts[i]) && parts[i] >= 0 ? Math.min(parts[i], 65535) : 0);
+  }
+  const text = ascii(version || '0.0.0') || '0.0.0';
+  const name = (ascii(title).replace(/"/g, "'").trim() || 'Bilup Player');
+  return [
+    '',
+    // Resource *type* differs from the icon group, so id 1 is free here and is
+    // what Explorer looks for in the file-properties dialog.
+    '1 VERSIONINFO',
+    `FILEVERSION ${quad.join(',')}`,
+    `PRODUCTVERSION ${quad.join(',')}`,
+    'FILEFLAGSMASK 0x3fL',
+    'FILEFLAGS 0x0L',
+    'FILEOS 0x40004L',
+    'FILETYPE 0x1L',
+    'FILESUBTYPE 0x0L',
+    'BEGIN',
+    '  BLOCK "StringFileInfo"',
+    '  BEGIN',
+    '    BLOCK "040904b0"',
+    '    BEGIN',
+    '      VALUE "CompanyName", "Bilup"',
+    `      VALUE "FileDescription", "${name}"`,
+    `      VALUE "FileVersion", "${text}"`,
+    `      VALUE "ProductName", "${name}"`,
+    `      VALUE "ProductVersion", "${text}"`,
+    '    END',
+    '  END',
+    '  BLOCK "VarFileInfo"',
+    '  BEGIN',
+    '    VALUE "Translation", 0x409, 1200',
+    '  END',
+    'END'
+  ].join('\r\n');
+};
+
 /**
  * Render the HTML, compress it, and lay down everything exe/build.cmd needs:
- * app.html.gz (the RT_RCDATA payload), app.meta (title/geometry), app.rc.
+ * app.html.gz (the RT_RCDATA payload), app.meta (title/geometry), an optional
+ * app.ico, and app.rc tying them together.
  *
  * Nothing here touches the host binary, so the size story stays
  * `exe = host code + gzip(html) + resources`.
  *
  * @returns {{pack: object, htmlBytes: Buffer, payload: Buffer, gzipped: boolean,
- *            paths: {payload: string, meta: string, rc: string}, metaLines: string[]}}
+ *            icon: object|null,
+ *            paths: {payload: string, meta: string, rc: string, icon: string|null},
+ *            metaLines: string[]}}
  */
 const writeExeResources = (input, options = {}) => {
   const {
@@ -303,6 +498,9 @@ const writeExeResources = (input, options = {}) => {
     preload = false,
     noDeflate = false,
     optimizePng = true,
+    windowMode = 'window',
+    version = '',
+    icon = null,
     // The player-side options the web UI exposes for both targets. An exe is a
     // packaged page with a WebView around it, so it takes the same runtime
     // settings as the HTML build — going through packToHtml keeps them from
@@ -333,28 +531,42 @@ const writeExeResources = (input, options = {}) => {
   const dir = buildDirFor(root);
   fs.mkdirSync(dir, {recursive: true});
 
+  const resolvedTitle = title || defaultTitle(inputPath);
   const metaLines = [
-    `title=${metaValue(title || defaultTitle(inputPath))}`,
+    `title=${metaValue(resolvedTitle)}`,
     `width=${width}`,
     `height=${height}`,
     `gzip=${gzipped ? 1 : 0}`,
     `devtools=${devtools ? 1 : 0}`
   ];
+  // Only when it is not the default: an existing payload keeps its exact bytes.
+  if (WINDOW_MODES.includes(windowMode) && windowMode !== 'window') {
+    metaLines.push(`window=${windowMode}`);
+  }
   if (probe) metaLines.push(`probe=${path.resolve(probe)}`);
 
   const paths = {
     payload: path.join(dir, 'app.html.gz'),
     meta: path.join(dir, 'app.meta'),
-    rc: path.join(dir, 'app.rc')
+    rc: path.join(dir, 'app.rc'),
+    icon: null
   };
   fs.writeFileSync(paths.payload, payload);
   fs.writeFileSync(paths.meta, metaLines.join('\n') + '\n', 'utf8');
+
   // ASCII resource script: cmd.exe/rc.exe parse it in the OEM code page, and the
   // document title lives in app.meta (read as UTF-8) precisely to keep non-ASCII
   // out of this file.
-  fs.writeFileSync(paths.rc, '101 RCDATA "app.html.gz"\r\n102 RCDATA "app.meta"\r\n', 'ascii');
+  let rc = '101 RCDATA "app.html.gz"\r\n102 RCDATA "app.meta"\r\n';
+  if (icon && icon.bytes) {
+    paths.icon = path.join(dir, 'app.ico');
+    fs.writeFileSync(paths.icon, icon.bytes);
+    rc += '1 ICON "app.ico"\r\n';
+  }
+  if (version) rc += rcVersionBlock(version, resolvedTitle) + '\r\n';
+  fs.writeFileSync(paths.rc, rc, 'ascii');
 
-  return {pack, htmlBytes, payload, gzipped, paths, metaLines};
+  return {pack, htmlBytes, payload, gzipped, icon, paths, metaLines};
 };
 
 /**
@@ -402,6 +614,9 @@ const hasScaffolding = (root = ROOT) => ({
   full: fs.existsSync(path.join(root, 'vendor', SCAFFOLDING_FULL))
 });
 
+/** The addon bundle is optional; only the chunk options need it. */
+const hasAddons = (root = ROOT) => fs.existsSync(path.join(root, 'vendor', SCAFFOLDING_ADDONS));
+
 module.exports = {
   ROOT,
   EXE_DIR,
@@ -409,19 +624,30 @@ module.exports = {
   VENDOR_DIR,
   SCAFFOLDING_MIN,
   SCAFFOLDING_FULL,
+  SCAFFOLDING_ADDONS,
+  MAX_IMAGE_BYTES,
+  WINDOW_MODES,
   buildDirFor,
   defaultTitle,
   human,
   pickScaffolding,
+  pickAddons,
+  readImageFile,
+  readIconFile,
+  resolveIcon,
+  resolveImage,
   prepareProject,
   inspectProject,
   renderProjectHtml,
   packToHtml,
+  packToZip,
   writeExeResources,
   buildExe,
   readBuiltExe,
   hasScaffolding,
+  hasAddons,
   RENDER_OPTION_KEYS,
+  ADDON_KEYS,
   pickRenderOptions,
   loadOptionSet
 };

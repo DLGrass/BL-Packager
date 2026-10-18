@@ -77,6 +77,9 @@
           version: window.__BL_VERSION__ || 'dev',
           // The runtime travels inside the bundle, so it is always there.
           scaffolding: {min: true, full: false},
+          // Addons are optional and only bundled when the file was present at
+          // build time; the page says so instead of failing on pack.
+          addons: window.__BL_ADDONS__ !== false,
           msvc: false,
           node: '—'
         });
@@ -109,12 +112,13 @@
               var key = String(name).toLowerCase();
               if (key === 'x-pack-stats') return encodeURIComponent(JSON.stringify(packed.stats));
               if (key === 'x-pack-filename') return encodeURIComponent(packed.name);
+              if (key === 'content-type') return packed.mime;
               return null;
             }
           },
           json: async function () { return {ok: true}; },
           text: async function () { return ''; },
-          blob: async function () { return new Blob([packed.html], {type: 'text/html'}); }
+          blob: async function () { return new Blob([packed.output], {type: packed.mime}); }
         };
       }
 

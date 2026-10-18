@@ -46,6 +46,9 @@ static std::wstring g_title = L"bl-packager project";
 static int g_width = 640;
 static int g_height = 480;
 static bool g_allowDevTools = true;
+// "window" (default) | "maximize" | "fullscreen" — set by app.meta, which is
+// what the packager writes when --window-mode asks for something else.
+static std::wstring g_windowMode = L"window";
 
 // Smoke-test support. When the metadata carries `probe=<path>`, the host loads
 // the project, asks the live VM through ExecuteScript what it built, writes the
@@ -123,6 +126,7 @@ static void ParseMeta(const BYTE* data, DWORD len) {
         else if (key == "height") g_height = std::atoi(val.c_str());
         else if (key == "gzip") g_payloadGzip = (val != "0");
         else if (key == "devtools") g_allowDevTools = (val != "0");
+        else if (key == "window") g_windowMode = Utf8ToWide(val);
         else if (key == "probe") g_probePath = Utf8ToWide(val);
     }
     if (g_width < 160) g_width = 160;
@@ -385,6 +389,35 @@ public:
 
 // -------------------------------------------------------------------- window
 
+// Fullscreen is borderless-maximised: the caption and the resize frame are
+// removed and the window is moved onto the whole monitor area. One function
+// because three things toggle it (F11, Escape, and app.meta at startup) and
+// they must agree about what "saved" means.
+static bool g_fullscreen = false;
+static RECT g_savedRect = {};
+static LONG_PTR g_savedStyle = 0;
+
+static void SetFullscreen(HWND hwnd, bool on) {
+    if (on == g_fullscreen) return;
+    g_fullscreen = on;
+    if (on) {
+        ::GetWindowRect(hwnd, &g_savedRect);
+        g_savedStyle = ::GetWindowLongPtrW(hwnd, GWL_STYLE);
+        MONITORINFO mi = {sizeof(mi)};
+        ::GetMonitorInfoW(::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+        ::SetWindowLongPtrW(hwnd, GWL_STYLE, g_savedStyle & ~(WS_CAPTION | WS_THICKFRAME));
+        ::SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                       mi.rcMonitor.right - mi.rcMonitor.left,
+                       mi.rcMonitor.bottom - mi.rcMonitor.top,
+                       SWP_NOZORDER | SWP_FRAMECHANGED);
+    } else {
+        ::SetWindowLongPtrW(hwnd, GWL_STYLE, g_savedStyle);
+        ::SetWindowPos(hwnd, HWND_TOP, g_savedRect.left, g_savedRect.top,
+                       g_savedRect.right - g_savedRect.left, g_savedRect.bottom - g_savedRect.top,
+                       SWP_NOZORDER | SWP_FRAMECHANGED);
+    }
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_SIZE:
@@ -414,27 +447,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_KEYDOWN:
             if (wp == VK_F11) {
-                static bool full = false;
-                static RECT saved = {};
-                static LONG_PTR savedStyle = 0;
-                full = !full;
-                if (full) {
-                    ::GetWindowRect(hwnd, &saved);
-                    savedStyle = ::GetWindowLongPtrW(hwnd, GWL_STYLE);
-                    MONITORINFO mi = {sizeof(mi)};
-                    ::GetMonitorInfoW(::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
-                    ::SetWindowLongPtrW(hwnd, GWL_STYLE,
-                                        savedStyle & ~(WS_CAPTION | WS_THICKFRAME));
-                    ::SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
-                                   mi.rcMonitor.right - mi.rcMonitor.left,
-                                   mi.rcMonitor.bottom - mi.rcMonitor.top,
-                                   SWP_NOZORDER | SWP_FRAMECHANGED);
-                } else {
-                    ::SetWindowLongPtrW(hwnd, GWL_STYLE, savedStyle);
-                    ::SetWindowPos(hwnd, HWND_TOP, saved.left, saved.top,
-                                   saved.right - saved.left, saved.bottom - saved.top,
-                                   SWP_NOZORDER | SWP_FRAMECHANGED);
-                }
+                SetFullscreen(hwnd, !g_fullscreen);
+            } else if (wp == VK_ESCAPE && g_fullscreen) {
+                // Escape leaves fullscreen and nothing else. Only when the window
+                // is actually fullscreen, so the page keeps its own Escape
+                // (pointer lock, dialogs) in every other case.
+                SetFullscreen(hwnd, false);
+                return 0;
             } else if (wp == VK_F12 && g_webview && g_allowDevTools) {
                 g_webview->OpenDevToolsWindow();
             }
@@ -467,7 +486,15 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)::GetStockObject(BLACK_BRUSH);
     wc.lpszClassName = L"BlPlayerWindow";
-    wc.hIcon = ::LoadIconW(inst, MAKEINTRESOURCEW(1));
+    // Resource 1 is the ICON statement the packager writes when --icon was given.
+    // Both sizes matter: hIcon is the taskbar/alt-tab image, hIconSm the title
+    // bar's. Absent resource => NULL => Windows' default, as before.
+    wc.hIcon = (HICON)::LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                   ::GetSystemMetrics(SM_CXICON),
+                                   ::GetSystemMetrics(SM_CYICON), 0);
+    wc.hIconSm = (HICON)::LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                     ::GetSystemMetrics(SM_CXSMICON),
+                                     ::GetSystemMetrics(SM_CYSMICON), 0);
     ::RegisterClassExW(&wc);
 
     RECT r = {0, 0, g_width, g_height};
@@ -479,7 +506,16 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         FailFast(L"CreateWindowExW failed.", 7);
         return 1;
     }
-    ::ShowWindow(g_hwnd, SW_SHOW);
+    // app.meta's `window=` chooses how the first frame appears. "fullscreen" is
+    // the same borderless mode F11 gives, so Escape has one meaning everywhere.
+    if (g_windowMode == L"fullscreen") {
+        ::ShowWindow(g_hwnd, SW_SHOW);
+        SetFullscreen(g_hwnd, true);
+    } else if (g_windowMode == L"maximize") {
+        ::ShowWindow(g_hwnd, SW_SHOWMAXIMIZED);
+    } else {
+        ::ShowWindow(g_hwnd, SW_SHOW);
+    }
     ::UpdateWindow(g_hwnd);
 
     // A null environment options means "use the installed Evergreen Runtime

@@ -30,15 +30,32 @@ const {
   buildDirFor,
   inspectProject,
   packToHtml,
+  packToZip,
   writeExeResources,
   buildExe,
   readBuiltExe,
-  hasScaffolding
+  hasScaffolding,
+  hasAddons,
+  resolveIcon,
+  MAX_IMAGE_BYTES,
+  WINDOW_MODES
 } = require('../src/lib/pipeline');
+const {normalizeImageDataUri} = require('../src/lib/datauri');
 
 const UI_DIR = __dirname;
 const DEFAULT_PORT = 8788;
 const MAX_UPLOAD = 512 * 1024 * 1024;
+
+/**
+ * The page sends every option in the query string, which keeps the body free for
+ * the sb3 itself (one request, no multipart parser). Loading-screen images and
+ * baked extension sources ride along the same way, so the default 16 KB header
+ * ceiling would cut them off — hence a deliberately larger one for a server
+ * bound to loopback. The per-item caps below are what actually bound the input.
+ */
+const MAX_HEADER_BYTES = 12 * 1024 * 1024;
+const MAX_EXTENSION_BYTES = 2 * 1024 * 1024;
+const MAX_EXTENSIONS_TOTAL = 6 * 1024 * 1024;
 
 const ARTIFACT_ALLOWLIST = [
   'bl-player.exe',
@@ -46,8 +63,11 @@ const ARTIFACT_ALLOWLIST = [
   'app.html.gz',
   'app.meta',
   'app.rc',
+  'app.ico',
   'WebView2Loader.dll'
 ];
+
+const badRequest = (message) => Object.assign(new Error(message), {status: 400});
 
 // --- helpers --------------------------------------------------------------
 
@@ -84,7 +104,8 @@ const BOOL_PARAMS = [
   'turbo', 'interpolation', 'highQualityPen', 'fencing', 'miscLimits',
   'compilerEnabled', 'warpTimer', 'closeWhenStopped', 'autoplay', 'progressBar',
   'controlGreenFlag', 'controlStopAll', 'controlPause', 'controlFullscreen',
-  'editableLists', 'packagedRuntime'
+  'editableLists', 'packagedRuntime',
+  'pointerlock', 'gamepad', 'specialCloudBehaviors', 'unsafeCloudBehaviors'
 ];
 
 /** name -> [min, max, fallback] */
@@ -93,14 +114,22 @@ const NUMBER_PARAMS = {
   maxClones: [1, 1000000, 300],
   stageWidth: [1, 4096, 480],
   stageHeight: [1, 4096, 360],
-  maxTextureDimension: [1, 16384, 2048]
+  maxTextureDimension: [1, 16384, 2048],
+  cursorCenterX: [-1024, 1024, 0],
+  cursorCenterY: [-1024, 1024, 0]
 };
 
 const STRING_PARAMS = [
-  'username', 'loadingText', 'resizeMode', 'cursor',
+  'username', 'loadingText', 'resizeMode', 'cursor', 'loadingImageMode',
   'accent', 'background', 'foreground', 'variableColor', 'listColor',
   'customCSS', 'customJS', 'cloudMode', 'projectId'
 ];
+
+/** Images are data: URLs in the query string; validated and re-encoded here. */
+const IMAGE_PARAMS = {
+  loadingImage: 'loading screen image',
+  cursorCustom: 'cursor image'
+};
 
 /**
  * The player/runtime options both targets accept, read from one place.
@@ -126,7 +155,58 @@ const playerOptions = (params) => {
   for (const key of STRING_PARAMS) {
     if (params.has(key)) out[key] = str(params, key, '');
   }
+  for (const [key, label] of Object.entries(IMAGE_PARAMS)) {
+    if (!params.has(key)) continue;
+    // '' means "no image", which is also what an invalid one must turn into.
+    let value;
+    try {
+      value = normalizeImageDataUri(params.get(key), {maxBytes: MAX_IMAGE_BYTES, name: label});
+    } catch (error) {
+      // A bad image is the caller's mistake, not a broken server.
+      throw badRequest(error.message);
+    }
+    if (value) out[key] = value;
+  }
   return out;
+};
+
+/**
+ * Baked extension sources, as JSON in the query string:
+ * `[{name, source}, …]` — the shape the page's file pickers produce.
+ *
+ * Each source becomes a `data:` URL inside the packed page, so the caps are not
+ * about this process's memory (the 512 MiB body cap covers the sb3); they are
+ * about refusing to build a page that no browser would open.
+ */
+const readExtensions = (params) => {
+  const raw = params.get('extensions');
+  if (!raw) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw badRequest('extensions is not valid JSON');
+  }
+  if (!Array.isArray(parsed)) throw badRequest('extensions must be an array');
+
+  let total = 0;
+  return parsed.map((entry, index) => {
+    const source = typeof entry === 'string' ? entry : entry && entry.source;
+    if (typeof source !== 'string' || !source.trim()) {
+      throw badRequest(`extension ${index} has no source`);
+    }
+    if (source.length > MAX_EXTENSION_BYTES) {
+      throw Object.assign(new Error(`extension ${index} is ${human(source.length)}; ` +
+        `the limit is ${human(MAX_EXTENSION_BYTES)}`), {status: 413});
+    }
+    total += source.length;
+    if (total > MAX_EXTENSIONS_TOTAL) {
+      throw Object.assign(new Error(`extensions total ${human(total)}; ` +
+        `the limit is ${human(MAX_EXTENSIONS_TOTAL)}`), {status: 413});
+    }
+    const name = (entry && typeof entry.name === 'string' && entry.name) || `extension-${index}.js`;
+    return {name: safeFileName(name), source};
+  });
 };
 
 /** Keep characters Windows refuses in a file name out of the download name. */
@@ -234,6 +314,8 @@ const handleHealth = (res) => sendJson(res, 200, {
   ok: true,
   node: process.version,
   scaffolding: hasScaffolding(ROOT),
+  // Optional: only pointer lock / gamepad / the cloud behaviours need it.
+  addons: hasAddons(ROOT),
   msvc: detectMsvc(),
   maxUpload: MAX_UPLOAD
 });
@@ -274,21 +356,52 @@ const handlePack = async (req, res, params) => {
   const started = Date.now();
   const title = str(params, 'title', '');
   const mode = str(params, 'mode', 'fast') === 'tw' ? 'tw' : 'fast';
+  const target = str(params, 'target', 'html') === 'zip' ? 'zip' : 'html';
+  const extensions = readExtensions(params);
 
-  const packed = packToHtml(input, {
-    mode,
+  const common = Object.assign({
     inputPath: str(params, 'filename', ''),
     title,
-    ...playerOptions(params),
+    extensions,
     preload: flag(params, 'preload'),
     noDeflate: flag(params, 'noDeflate'),
     optimizePng: flag(params, 'optimizePng', true),
     // viewAssets is intentionally unreachable from the web UI: it is a
     // documented performance regression, not a feature.
     onWarn: () => {}
-  });
+  }, playerOptions(params));
 
   const resolvedTitle = safeFileName(title || defaultTitle(str(params, 'filename', '')));
+
+  // --- zip target: index.html + project.json + assets/ ---------------------
+  if (target === 'zip') {
+    const zipped = packToZip(input, common);
+    const name = `${resolvedTitle}.zip`;
+    const stats = {
+      title: title || defaultTitle(str(params, 'filename', '')),
+      target,
+      zipBytes: zipped.zip.length,
+      htmlBytes: zipped.html.length,
+      entries: zipped.entries.length,
+      scaffolding: path.basename(zipped.scaffoldingSource),
+      project: zipped.project.analysis,
+      extensions: extensions.map((entry) => entry.name),
+      ms: Date.now() - started
+    };
+    res.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Length': zipped.zip.length,
+      'Content-Disposition': contentDisposition(name),
+      'X-Pack-Stats': encodeURIComponent(JSON.stringify(stats)).replace(/[^\x20-\x7e]/g, ''),
+      'X-Pack-Filename': encodeURIComponent(name),
+      'Cache-Control': 'no-store'
+    });
+    res.end(zipped.zip);
+    return;
+  }
+
+  const packed = packToHtml(input, Object.assign({}, common, {mode}));
+
   const name = mode === 'tw' ? `${resolvedTitle}.tw.html` : `${resolvedTitle}.html`;
 
   const stats = {
@@ -301,6 +414,7 @@ const handlePack = async (req, res, params) => {
     scaffolding: path.basename(packed.scaffoldingSource),
     container: packed.containerStats,
     project: packed.project.analysis,
+    extensions: extensions.map((entry) => entry.name),
     ms: Date.now() - started
   };
 
@@ -315,29 +429,53 @@ const handlePack = async (req, res, params) => {
   res.end(packed.html);
 };
 
+/**
+ * The exe's icon arrives as a data: URL (the page's file picker) and has to be
+ * a real icon container: rc.exe's `ICON` statement will not take a PNG, and a
+ * failed resource compile is an unhelpful way to learn that. resolveIcon() is
+ * the same check the CLI applies to `--icon`.
+ */
+const readIconParam = (params) => {
+  const raw = params.get('icon');
+  if (!raw) return null;
+  try {
+    return resolveIcon(raw);
+  } catch (error) {
+    throw badRequest(error.message);
+  }
+};
+
 const handlePackExe = async (req, res, params, ctx) => {
   const input = await readBody(req);
   if (!input.length) throw Object.assign(new Error('empty request body'), {status: 400});
 
   const wantBuild = flag(params, 'build');
   const title = str(params, 'title', '');
+  const windowMode = WINDOW_MODES.includes(str(params, 'windowMode', 'window'))
+    ? str(params, 'windowMode', 'window')
+    : 'window';
+  const icon = readIconParam(params);
+  const extensions = readExtensions(params);
 
   const result = await serializeExe(() => {
     const started = Date.now();
-    const resources = writeExeResources(input, {
+    const resources = writeExeResources(input, Object.assign({
       inputPath: str(params, 'filename', ''),
       title,
       width: boundedInt(params, 'width', 640, 160, 8192),
       height: boundedInt(params, 'height', 480, 160, 8192),
+      windowMode,
+      icon,
+      version: str(params, 'version', ''),
       gzip: flag(params, 'gzip', true),
       gzipLevel: num(params, 'gzipLevel', 9),
       devtools: flag(params, 'devtools', true),
       preload: flag(params, 'preload'),
       noDeflate: flag(params, 'noDeflate'),
       optimizePng: flag(params, 'optimizePng', true),
-      ...playerOptions(params),
+      extensions,
       root: ctx.buildRoot
-    });
+    }, playerOptions(params)));
 
     let build = {attempted: false, ok: null, status: null, reason: null, stdout: '', stderr: ''};
     if (wantBuild) {
@@ -357,9 +495,12 @@ const handlePackExe = async (req, res, params, ctx) => {
       report: {
         input: str(params, 'filename', ''),
         title: title || defaultTitle(str(params, 'filename', '')),
+        windowMode,
+        icon: icon ? 'app.ico' : null,
         project: pack.project.analysis,
         container: pack.containerStats,
         scaffolding: path.basename(pack.scaffoldingSource),
+        extensions: extensions.map((entry) => entry.name),
         htmlBytes: resources.htmlBytes.length,
         resourceBytes: resources.payload.length,
         resourceGzip: !!resources.gzipped,
@@ -403,7 +544,10 @@ const handleArtifact = (res, params, ctx) => {
 const createServer = ({allowAnyHost = false, buildRoot = ROOT} = {}) => {
   const ctx = {buildRoot, buildDir: buildDirFor(buildRoot)};
 
-  return http.createServer((req, res) => {
+  // maxHeaderSize: the request line carries the option set, including data: URLs
+  // for images and extension sources. Loopback-only, and each item is capped by
+  // its own limit, so the ceiling here is a backstop rather than the guard.
+  return http.createServer({maxHeaderSize: MAX_HEADER_BYTES}, (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
 
     // Loopback-only guard. A page on the public internet can reach 127.0.0.1;
@@ -477,7 +621,16 @@ const main = async () => {
   }
 };
 
-module.exports = {createServer, listen, safeFileName, MAX_UPLOAD};
+module.exports = {
+  createServer,
+  listen,
+  safeFileName,
+  playerOptions,
+  readExtensions,
+  MAX_UPLOAD,
+  MAX_EXTENSION_BYTES,
+  MAX_EXTENSIONS_TOTAL
+};
 
 if (require.main === module) {
   main().catch((error) => {

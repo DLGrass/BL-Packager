@@ -7,9 +7,12 @@
 # One input is deliberately absent from the repository, and the build cannot run
 # without it:
 #
-#   vendor/scaffolding-min.js   the runtime the produced HTML embeds. It is a
-#                               build artifact of TurboWarp's scaffolding and is
-#                               not redistributed here; see README section 4.
+#   vendor/scaffolding-min.js      the runtime the produced HTML embeds. It is a
+#                                  build artifact of TurboWarp's scaffolding and is
+#                                  not redistributed here; see README section 4.
+#   vendor/scaffolding-addons.js   pointer lock / gamepad / cloud behaviours.
+#                                  Optional for a build, but the site should carry
+#                                  it so those switches work there.
 #
 # Pages must be switched to "GitHub Actions" as its source once, in repository
 # settings; until then the deploy fails with the message configure-pages prints,
@@ -38,12 +41,17 @@ jobs:
       - uses: actions/checkout@v4
 
       # The bundle embeds the runtime, so the build cannot run without it.
+      # addons.js is optional in principle (only pointer lock / gamepad / the
+      # cloud behaviours need it), but the deployed site should offer those
+      # switches rather than reject them at pack time.
       - name: Fetch the runtime scripts that are not redistributed here
         shell: bash
         run: |
           curl -fsSL -o vendor/scaffolding-min.js \
             https://packager.turbowarp.org/scaffolding/scaffolding-min.js
-          ls -l vendor/scaffolding-min.js
+          curl -fsSL -o vendor/scaffolding-addons.js \
+            https://packager.turbowarp.org/scaffolding/addons.js
+          ls -l vendor/*.js
 
       # No `version:` -- the action reads packageManager from package.json, which
       # is the whole point of pinning it there.

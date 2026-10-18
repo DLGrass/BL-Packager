@@ -7,23 +7,35 @@
 //
 //   1. the scaffolding runtime, inlined
 //   2. boot script: create scaffolding, configure the VM, wire controls
-//   3. base85 decoder + decodeChunk + takePayload
-//   4. the data, as <script data="..."> chunks
+//   2b. the addon bundle (pointer lock / gamepad / cloud behaviours / pause),
+//       only when one of those was asked for
+//   3. base85 decoder + decodeChunk + takePayload       (absent in http mode)
+//   4. the data, as <script data="..."> chunks          (absent in http mode)
 //   5. the loader runtime (BLPK reader / pure-JS inflate, when needed)
 //   6. createProjectSource + run()
 //
 // Every option below is one that the inlined scaffolding actually honours, and
 // the call it turns into is copied from TurboWarp's src/packager/packager.js
-// rather than invented here. Anything upstream offers that this repo cannot
-// make happen (extensions fetched over the network, the gamepad/pointerlock
-// chunks, cloud variables over a WebSocket, the zip/electron/nwjs targets,
-// custom cursors and loading-screen images, which would need an upload channel
-// the API does not have) is deliberately absent rather than present and inert.
+// rather than invented here. What upstream offers and this repo still cannot
+// make happen is: cloud variables over a WebSocket (needs a network), the
+// zip/electron/nwjs/WKWebView *application* targets (need the npm toolchains
+// that build them), Steamworks, and importing a project by Scratch ID or URL.
+// Everything else has a switch — see the README's comparison table.
 //
 // Cloud variables are the one upstream feature that is here in half: the
 // LocalStorageProvider needs no network, so `cloudMode: 'local'` is real and
 // makes ☁ variables survive a reload. The WebSocket provider is the half that
 // is missing, because this packager is meant to work offline.
+//
+// Three modes, and the third is a different shape of page rather than a
+// different payload:
+//
+//   'fast'  BLPK container, base85, decoded in place (default)
+//   'tw'    the raw sb3 and Scaffolding.JSZip (upstream's strategy, for A/B)
+//   'http'  no payload at all: index.html + assets/ + project.json, for the
+//           zip target. Assets are fetched as the VM asks for them, so the
+//           browser parallelises and caches them — the opposite trade-off from
+//           inlining, and the reason TW's zip target exists.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -31,6 +43,9 @@ const path = require('node:path');
 const {encodeChunk, decoderSource} = require('./base85');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
+
+/** Where the zip target keeps its assets, relative to index.html. */
+const ASSET_BASE = 'assets/';
 
 const readRuntime = (name) => fs.readFileSync(path.join(RUNTIME_DIR, name), 'utf8');
 
@@ -61,10 +76,13 @@ const clampInt = (value, min, max, fallback) => {
 const jsNumber = (value) => (value === Infinity ? 'Infinity' : String(value));
 
 const RESIZE_MODES = ['preserve-ratio', 'stretch', 'dynamic-resize'];
-const CURSORS = ['auto', 'none'];
+const CURSORS = ['auto', 'none', 'custom'];
 // 'ws' (upstream's default) would need a network, which this packager does not
 // use; 'off' leaves ☁ variables behaving like ordinary variables.
 const CLOUD_MODES = ['off', 'local'];
+const LOADING_IMAGE_MODES = ['normal', 'stretch'];
+
+const isDataImage = (value) => /^data:image\//i.test(String(value || ''));
 
 const rgbToHsv = ({r, g, b}) => {
   // Normalize first: the hue term is f / (v - x), which is only dimensionless
@@ -140,6 +158,9 @@ const DEFAULT_OPTIONS = () => ({
   foreground: '#ffffff',
   loadingText: '',
   progressBar: true,
+  // A data: URL, already validated and re-encoded by datauri.js.
+  loadingImage: '',
+  loadingImageMode: 'normal',
   controlGreenFlag: false,
   controlStopAll: false,
   controlPause: false,
@@ -150,6 +171,17 @@ const DEFAULT_OPTIONS = () => ({
   packagedRuntime: true,
   customCSS: '',
   customJS: '',
+
+  // --- interaction ---------------------------------------------------------
+  // Upstream splits these into `cursor.custom` / `chunks.*`; flattened here like
+  // every other option, and derived back into the addon call in the page.
+  cursorCustom: '',
+  cursorCenterX: 0,
+  cursorCenterY: 0,
+  pointerlock: false,
+  gamepad: false,
+  specialCloudBehaviors: false,
+  unsafeCloudBehaviors: false,
 
   // --- ours ----------------------------------------------------------------
   csp: "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src * data: blob:",
@@ -163,6 +195,13 @@ const DEFAULT_OPTIONS = () => ({
   // the container actually holds deflated entries. pack.js passes the real count.
   deflatedEntries: 1,
   scaffoldingSource: null,
+  // Path to vendor/scaffolding-addons.js, or null when no addon was asked for.
+  addonsSource: null,
+  // Data URLs of every baked extension. They are registered right after boot,
+  // not left for the VM to discover: `_loadExtensions()` only walks the ids the
+  // *blocks* use, so an extension nothing calls would never load. See
+  // lib/extensions.js.
+  eagerExtensions: [],
   buildInfo: ''
 });
 
@@ -189,6 +228,24 @@ const normalizeOptions = (raw) => {
   options.resizeMode = RESIZE_MODES.includes(options.resizeMode) ? options.resizeMode : base.resizeMode;
   options.cursor = CURSORS.includes(options.cursor) ? options.cursor : base.cursor;
   options.cloudMode = CLOUD_MODES.includes(options.cloudMode) ? options.cloudMode : base.cloudMode;
+  options.loadingImageMode = LOADING_IMAGE_MODES.includes(options.loadingImageMode)
+    ? options.loadingImageMode
+    : base.loadingImageMode;
+
+  // Anything that is not a data: image is treated as absent. A path or an http
+  // URL here would render as a broken image in an offline build, so the only
+  // honest thing to do is not emit it at all.
+  options.loadingImage = isDataImage(options.loadingImage) ? String(options.loadingImage) : '';
+  options.cursorCustom = isDataImage(options.cursorCustom) ? String(options.cursorCustom) : '';
+  // A custom image *is* the choice: leaving the cursor at 'auto' with an image
+  // attached would make --cursor-image an option that silently does nothing.
+  // 'none' still wins, because hiding the pointer is the more specific intent.
+  if (options.cursorCustom && options.cursor !== 'none') options.cursor = 'custom';
+  else if (options.cursor === 'custom') options.cursor = base.cursor;
+
+  // A cursor hotspot outside the image is not an error, it just points nowhere.
+  options.cursorCenterX = clampInt(options.cursorCenterX, -1024, 1024, 0);
+  options.cursorCenterY = clampInt(options.cursorCenterY, -1024, 1024, 0);
 
   options.accent = color(options.accent, base.accent);
   options.background = color(options.background, base.background);
@@ -199,9 +256,14 @@ const normalizeOptions = (raw) => {
   for (const key of ['turbo', 'interpolation', 'highQualityPen', 'fencing', 'miscLimits',
     'compilerEnabled', 'warpTimer', 'closeWhenStopped', 'autoplay', 'progressBar',
     'controlGreenFlag', 'controlStopAll', 'controlPause', 'controlFullscreen',
-    'editableLists', 'packagedRuntime', 'copyAssets', 'preload', 'instrument']) {
+    'editableLists', 'packagedRuntime', 'copyAssets', 'preload', 'instrument',
+    'pointerlock', 'gamepad', 'specialCloudBehaviors', 'unsafeCloudBehaviors']) {
     options[key] = !!options[key];
   }
+
+  options.eagerExtensions = Array.isArray(options.eagerExtensions)
+    ? options.eagerExtensions.filter((value) => typeof value === 'string' && value)
+    : [];
 
   options.title = String(options.title == null ? '' : options.title);
   options.username = String(options.username == null ? '' : options.username);
@@ -213,6 +275,43 @@ const normalizeOptions = (raw) => {
 };
 
 /**
+ * The loading screen's picture covers the whole screen without distorting it.
+ * `contain` rather than `cover`: a loading image is usually a logo, and cropping
+ * a logo is worse than leaving background around it.
+ */
+const loadingImageCss = (options) => {
+  if (!options.loadingImage || options.loadingImageMode !== 'stretch') return '';
+  return `#loading {
+      background-image: url("${options.loadingImage}");
+      background-repeat: no-repeat;
+      background-size: contain;
+      background-position: center;
+    }`;
+};
+
+/** `url(…) x y, auto` is the CSS spelling of a hotspot; the fallback matters. */
+const cursorCss = (options) => {
+  if (options.cursor === 'custom' && options.cursorCustom) {
+    return `url("${options.cursorCustom}") ${options.cursorCenterX} ${options.cursorCenterY}, auto`;
+  }
+  return options.cursor;
+};
+
+/**
+ * Shape of the `ScaffoldingAddons.run()` argument: the addon bundle reads these
+ * five keys directly (see its `t.gamepad && …` dispatch), and `pause` is what
+ * replaces `vm.setPaused` with one that also suspends the audio context and
+ * freezes thread timers instead of only stopping the sequencer.
+ */
+const addonOptions = (options) => ({
+  pointerlock: options.pointerlock,
+  gamepad: options.gamepad,
+  specialCloudBehaviors: options.specialCloudBehaviors,
+  unsafeCloudBehaviors: options.unsafeCloudBehaviors,
+  pause: options.controlPause
+});
+
+/**
  * @param {object} project result of loadSb3()
  * @param {Buffer|Uint8Array} payload the bytes to embed (sb3 for tw, BLPK for fast)
  * @param {object} [userOptions]
@@ -221,8 +320,12 @@ const normalizeOptions = (raw) => {
 const renderHtml = (project, payload, userOptions = {}) => {
   const options = normalizeOptions(userOptions);
 
-  const bytes = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
-  const payloadLength = bytes.length;
+  const isHttp = options.mode === 'http';
+  if (isHttp && payload) {
+    throw new Error("mode 'http' embeds no payload; the assets ship next to index.html");
+  }
+  const bytes = isHttp || !payload ? null : (Buffer.isBuffer(payload) ? payload : Buffer.from(payload));
+  const payloadLength = bytes ? bytes.length : 0;
   const decodeBufferLength = Math.ceil(payloadLength / 4) * 4;
 
   if (!options.scaffoldingSource) {
@@ -238,6 +341,9 @@ const renderHtml = (project, payload, userOptions = {}) => {
   }
 
   // --- 5. loader runtime --------------------------------------------------
+  // Only the fast mode reads a container; the http mode needs neither the
+  // reader nor the pure-JS inflater, and inlining them would be dead weight in
+  // a target whose whole point is that the page stays small.
   const needsInflateFallback = options.mode === 'fast' && options.deflatedEntries !== 0;
   const loaderRuntime = [
     needsInflateFallback ? readRuntime('inflate-raw.js') : '',
@@ -245,11 +351,19 @@ const renderHtml = (project, payload, userOptions = {}) => {
     readRuntime('loader.js')
   ].filter(Boolean).join('\n');
 
+  // --- addons -------------------------------------------------------------
+  // Upstream fetches this bundle at pack time; here it is a file the user puts
+  // in vendor/ next to the runtime, for the same reason: it is an upstream
+  // artifact this repository does not redistribute.
+  const addons = options.addonsSource
+    ? escapeScriptBody(fs.readFileSync(options.addonsSource, 'utf8'))
+    : '';
+
   const header = `<!DOCTYPE html>
 <!--
   Packaged with bl-packager.
   mode: ${options.mode}
-  payload: ${payloadLength} bytes (${options.mode === 'tw' ? 'original sb3' : 'BLPK container'})
+  payload: ${payloadLength} bytes (${options.mode === 'tw' ? 'original sb3' : isHttp ? 'external, see assets/' : 'BLPK container'})
   source project: ${project.analysis.targetCount} targets, ${project.analysis.assetCount} assets, ${project.analysis.assetBytes} asset bytes
   ${options.buildInfo}
 -->
@@ -280,6 +394,9 @@ const renderHtml = (project, payload, userOptions = {}) => {
     .progress-bar-outer { border: 1px solid currentColor; height: 10px; width: 200px; }
     .progress-bar-inner { height: 100%; width: 0; background: currentColor; }
     .loading-text { font-weight: normal; font-size: 36px; margin: 0 0 16px; }
+    .loading-image { display: flex; align-items: center; justify-content: center; margin-bottom: 16px; }
+    .loading-image img { max-width: 60vw; max-height: 40vh; image-rendering: auto; }
+    ${loadingImageCss(options)}
     .control-button {
       width: 2rem; height: 2rem; padding: 0.375rem; margin: 0.5rem; border: 0; border-radius: 4px;
       cursor: pointer; user-select: none; -webkit-user-select: none;
@@ -287,7 +404,7 @@ const renderHtml = (project, payload, userOptions = {}) => {
     .control-button-highlight:hover { background: ${options.accent}26; }
     .control-button-highlight.active { background: ${options.accent}59; }
     .fullscreen-button { background: white; }
-    .sc-canvas { cursor: ${options.cursor}; }
+    .sc-canvas { cursor: ${cursorCss(options)}; }
     .sc-monitor-root[data-opcode^="data_"] .sc-monitor-value-color {
       background-color: ${options.variableColor};
     }
@@ -317,6 +434,9 @@ const renderHtml = (project, payload, userOptions = {}) => {
 
   <div id="loading" class="screen">
     <noscript>Enable JavaScript</noscript>
+    ${options.loadingImage && options.loadingImageMode === 'normal'
+      ? `<div class="loading-image"><img alt="" src="${escapeXML(options.loadingImage)}"></div>`
+      : ''}
     ${options.loadingText ? `<h1 class="loading-text">${escapeXML(options.loadingText)}</h1>` : ''}
     ${options.progressBar ? '<div class="progress-bar-outer"><div class="progress-bar-inner" id="loading-inner"></div></div>' : ''}
   </div>
@@ -338,14 +458,18 @@ const renderHtml = (project, payload, userOptions = {}) => {
   <!-- 2. boot -->
   <script>${escapeScriptBody(bootScript(options))}</script>
 
+  ${addons ? `<!-- 2b. addons: pointer lock, gamepad, cloud behaviours, real pause -->
+  <script>${addons}</script>
+  <script>ScaffoldingAddons.run(scaffolding, ${JSON.stringify(addonOptions(options))});</script>` : ''}
+
   ${options.customJS ? `<script>${escapeScriptBody(customJSScript(options))}</script>` : ''}
 
-  <!-- 3. base85 decoder -->
+  ${isHttp ? '' : `<!-- 3. base85 decoder -->
   <script>${escapeScriptBody(decoderScript(decodeBufferLength, payloadLength, options))}</script>
 
   <!-- 4. project payload -->
 ${chunks.join('\n')}
-
+`}
   <!-- 5+6. loader runtime and startup -->
   <script>${escapeScriptBody(`${loaderRuntime}\n${runScript(options)}`)}</script>
 </body>
@@ -467,6 +591,16 @@ try {
     canLoadExtensionFromProject: () => true
   });
 
+  ${options.eagerExtensions.length ? `
+  // Extensions baked into this file that project.json never referenced: there
+  // is no id in the map to replace, so they are registered the way upstream
+  // does it. Started before loadProject(), which awaits every pending load.
+  for (const extensionSource of ${JSON.stringify(options.eagerExtensions)}) {
+    Promise.resolve(vm.extensionManager.loadExtensionURL(extensionSource))
+      .catch((error) => console.error('extension failed to load', error));
+  }
+  ` : ''}
+
   ${options.closeWhenStopped ? `
   vm.runtime.on('PROJECT_RUN_STOP', () => {
     if (!vm.isPaused || !vm.isPaused()) {
@@ -587,7 +721,8 @@ const projectSource = createProjectSource({
   storage: scaffolding.storage,
   vm,
   Scaffolding: (typeof Scaffolding !== 'undefined' ? Scaffolding : undefined),
-  takePayload,
+  takePayload: ${options.mode === 'http' ? 'null' : 'takePayload'},
+  assetBase: ${JSON.stringify(ASSET_BASE)},
   copyAssets: ${options.copyAssets},
   preload: ${options.preload}
 });
@@ -602,6 +737,7 @@ storage.onprogress = (total, loaded) => {
 
 const run = async () => {
   benchMark('decoded');
+  ${options.mode === 'http' ? '// No inlined payload to decode, so start the bar where the decoder would.\n  setProgress(0.15);' : ''}
   const projectData = await getProjectData();
   benchMark('projectData');
   if (projectSource.warmUp) projectSource.warmUp();
@@ -633,6 +769,8 @@ module.exports = {
   renderHtml,
   DEFAULT_OPTIONS,
   CHUNK_SIZE,
+  ASSET_BASE,
+  addonOptions,
   escapeXML,
   darken,
   normalizeOptions

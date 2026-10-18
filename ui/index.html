@@ -234,6 +234,14 @@
   #downloads { margin: 8px 0 0; }
   #downloads a { font-weight: bold; }
 
+  /* The list of extension files attached to the pack: name + size + remove. */
+  ul.chips { list-style: none; margin: 6px 0 0; padding: 0; }
+  ul.chips li {
+    display: flex; align-items: center; gap: 8px;
+    padding: 3px 0; font: 12px/1.6 ui-monospace, Consolas, monospace;
+  }
+  ul.chips li button { padding: 1px 8px; font-size: 12px; }
+
   footer { text-align: center; padding-bottom: 24px; }
   footer > div { margin-top: 12px; }
 </style>
@@ -379,6 +387,20 @@
         <label for="loadingText">加载提示文本</label>
         <input type="text" id="loadingText" placeholder="（无）">
       </div>
+      <div class="option">
+        <label for="loadingImageInput">加载页图片</label>
+        <input type="file" id="loadingImageInput" accept="image/*">
+        <button class="button" id="loadingImageClear" hidden><div class="dimmer"></div><div class="text">清除</div></button>
+      </div>
+      <p class="muted" id="loadingImageNote">没有选择图片。图片会以 data 形式嵌进产物，所以离线也能显示。</p>
+      <div class="group" id="loadingImageModeGroup" hidden>
+        <label class="option">
+          <input type="radio" name="loadingImageMode" value="normal" checked> 按原尺寸显示（过大时等比缩小）
+        </label>
+        <label class="option">
+          <input type="radio" name="loadingImageMode" value="stretch"> 铺满整个加载页（等比，四周留底色）
+        </label>
+      </div>
 
       <h3>控制栏</h3>
       <div class="group">
@@ -439,9 +461,33 @@
         <label class="option">
           <input type="radio" name="cursor" value="none"> 无指针
         </label>
+        <label class="option">
+          <input type="radio" name="cursor" value="custom"> 自定义指针图案
+        </label>
       </div>
-      <p class="muted">上游还有「自定义指针图案」和「指针锁定 / 手柄」两组选项。前者要上传图片，
-        后者要靠 addons 里的额外区块，本机版都不具备，所以没有放上来。</p>
+      <div class="option">
+        <label for="cursorImageInput">指针图片</label>
+        <input type="file" id="cursorImageInput" accept="image/*">
+        <button class="button" id="cursorImageClear" hidden><div class="dimmer"></div><div class="text">清除</div></button>
+      </div>
+      <p class="muted" id="cursorImageNote">没有选择图片。选好图片后会自动切到「自定义指针图案」。</p>
+      <div class="option">
+        <label for="cursorCenterX">指针热点</label>
+        <input type="number" class="wider" id="cursorCenterX" value="0" min="-1024" max="1024">
+        <span>×</span>
+        <input type="number" class="wider" id="cursorCenterY" value="0" min="-1024" max="1024">
+        <span class="muted">相对图片左上角，决定"点在哪儿"</span>
+      </div>
+
+      <h3>附加输入</h3>
+      <label class="option">
+        <input type="checkbox" id="pointerlock"> 指针锁定（Pointer Lock）
+      </label>
+      <label class="option">
+        <input type="checkbox" id="gamepad"> 手柄支持（Gamepad）
+      </label>
+      <p class="muted" id="addonsNote">这两项要靠 <code>vendor/scaffolding-addons.js</code>，缺了这个文件就会打包失败；
+        它和运行时脚本一样不随仓库分发，见 README。指针锁定对第一人称类作品是必需的。</p>
     </section>
 
     <section class="card">
@@ -462,6 +508,17 @@
       </div>
       <p class="muted">上游的默认做法是连到 <code>clouddata.turbowarp.org</code> 与其他玩家实时同步，
         那需要联网，因此本机版只提供本地存储这一种模式。</p>
+
+      <h3>特殊云变量行为</h3>
+      <label class="option">
+        <input type="checkbox" id="specialCloudBehaviors"> 解析 <code>☁ url</code> / <code>☁ redirect</code> /
+          <code>☁ open link</code> / <code>☁ username</code> 等特殊名字
+      </label>
+      <label class="option">
+        <input type="checkbox" id="unsafeCloudBehaviors"> 额外解析 <code>☁ eval</code> 等「不安全」行为
+      </label>
+      <p class="muted">这两项来自 addons 包，和「指针锁定」共用同一个文件。勾上「不安全」等于让作品里的
+        变量内容当代码执行，只对你信任的作品开。</p>
     </section>
 
     <section class="card">
@@ -489,8 +546,19 @@
         <label><input type="checkbox" id="bigTexture"> 增大最大矢量图像分辨率</label>
         <span class="muted">2048 → 4096，大矢量图看起来更好，但更吃内存，也可能崩</span>
       </div>
-      <p class="muted">上游还可以挂「自定义扩展」并在打包时烘焙进去。那一步要么联网下载，要么把扩展源码整段塞进产物，
-        和本机版「不联网」的前提冲突，因此没有放上来。</p>
+    </section>
+
+    <section class="card">
+      <h2>自定义扩展</h2>
+      <p class="muted">作品里引用了 <code>extensions.turbowarp.org</code> 之类的扩展时，产物打开时会去联网抓源码，
+        离线就加载不出来——这是「打包后打不开」最常见的原因。在这里把扩展的 <code>.js</code> 选进来，
+        源码会被直接烘进产物，打开时不再联网。</p>
+      <div class="option">
+        <label for="extensionInput">扩展文件</label>
+        <input type="file" id="extensionInput" accept=".js,text/javascript" multiple>
+      </div>
+      <ul class="chips" id="extensionList"></ul>
+      <p class="muted" id="extensionNote">还没有选择扩展。命令行可以用 <code>--extension</code> 传路径或 URL。</p>
     </section>
 
     <section class="card">
@@ -526,6 +594,9 @@
           <input type="radio" name="target" value="html" checked> 单文件 HTML
         </label>
         <label class="option">
+          <input type="radio" name="target" value="zip"> 静态网站（ZIP 包）
+        </label>
+        <label class="option">
           <input type="radio" name="target" value="exe"> Windows 应用程序（EXE）
         </label>
       </div>
@@ -540,6 +611,26 @@
         <div class="option">
           <label for="height">窗口高</label>
           <input type="number" class="wider" id="height" value="480" min="160" max="8192">
+        </div>
+        <div class="option">
+          <label for="windowMode">启动时</label>
+          <select id="windowMode">
+            <option value="window">普通窗口</option>
+            <option value="maximize">最大化</option>
+            <option value="fullscreen">全屏（Esc 退出全屏）</option>
+          </select>
+        </div>
+        <h3>应用信息</h3>
+        <div class="option">
+          <label for="iconInput">程序图标</label>
+          <input type="file" id="iconInput" accept=".ico,image/x-icon">
+          <button class="button" id="iconClear" hidden><div class="dimmer"></div><div class="text">清除</div></button>
+        </div>
+        <p class="muted" id="iconNote">没有选择图标，用的是默认图标。只接受 <code>.ico</code>（Windows 的图标容器）。</p>
+        <div class="option">
+          <label for="appVersion">版本号</label>
+          <input type="text" class="shorter" id="appVersion" placeholder="例如 1.0.0">
+          <span class="muted">写进 exe 的「文件属性」，留空则不生成</span>
         </div>
         <h3>宿主</h3>
         <div class="option">
@@ -654,6 +745,8 @@ const DEFAULTS = {
   autoplay: false,
   progressBar: true,
   loadingText: '',
+  loadingImage: '',
+  loadingImageMode: 'normal',
   controlGreenFlag: false,
   controlStopAll: false,
   controlPause: false,
@@ -665,6 +758,13 @@ const DEFAULTS = {
   variableColor: '#ff8c1a',
   listColor: '#fc662c',
   cursor: 'auto',
+  cursorCustom: '',
+  cursorCenterX: 0,
+  cursorCenterY: 0,
+  pointerlock: false,
+  gamepad: false,
+  specialCloudBehaviors: false,
+  unsafeCloudBehaviors: false,
   cloudMode: 'off',
   projectId: '',
   compilerEnabled: true,
@@ -681,11 +781,20 @@ const DEFAULTS = {
   noDeflate: false,
   width: 640,
   height: 480,
+  windowMode: 'window',
+  icon: '',
+  version: '',
   devtools: true,
-  build: false
+  build: false,
+  // Baked extension sources. Kept out of DEFAULTS' DOM mirror on purpose: these
+  // are files, not controls, and they live in `state`.
+  extensions: []
 };
 
-const state = {file: null, blobUrl: null, busy: false};
+// Files the user attached this session. A data URL is the only form that
+// survives the trip through a query string, and it is also exactly what the
+// renderer wants, so the conversion happens once, on selection.
+const state = {file: null, blobUrl: null, busy: false, extensions: []};
 
 const bytes = (n) => {
   if (n === null || n === undefined) return '—';
@@ -714,6 +823,142 @@ $('theme').addEventListener('change', () => {
   try { localStorage.setItem('BLPackager.theme', themeChoice); } catch { /* private mode */ }
 });
 themeQuery.addEventListener('change', () => { if (themeChoice === 'system') applyTheme('system'); });
+
+// --- attached files --------------------------------------------------------
+// Images, icons and extension sources are files, not form controls, so they live
+// in `state.files` and only surface as data URLs when the option set is read.
+// One representation (data URL) is used everywhere downstream: the local server
+// receives it in the query string, the static site hands the object to the
+// worker, and the renderer requires it — so there is no second code path.
+
+state.files = {loadingImage: null, cursorImage: null, icon: null};
+
+const dataUrlBytes = (uri) => {
+  const match = /;base64,/.exec(uri || '');
+  if (!match) return 0;
+  return Math.floor((String(uri).length - match.index - match[0].length) * 3 / 4);
+};
+
+const readAsDataUrl = (file) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(String(reader.result || ''));
+  reader.onerror = () => reject(reader.error || new Error('读不了 ' + file.name));
+  reader.readAsDataURL(file);
+});
+
+const readAsText = (file) => (typeof file.text === 'function'
+  ? file.text()
+  : readAsDataUrl(file));
+
+const FILE_NOTE_IDS = {
+  loadingImage: {input: 'loadingImageInput', clear: 'loadingImageClear', note: 'loadingImageNote'},
+  cursorImage: {input: 'cursorImageInput', clear: 'cursorImageClear', note: 'cursorImageNote'},
+  icon: {input: 'iconInput', clear: 'iconClear', note: 'iconNote'}
+};
+
+const FILE_NOTE_TEXT = {
+  loadingImage: {
+    empty: '没有选择图片。图片会以 data 形式嵌进产物，所以离线也能显示。',
+    filled: (name, size) => `已选择 ${name}（${bytes(size)}），会嵌进产物。`
+  },
+  cursorImage: {
+    empty: '没有选择图片。选好图片后会自动切到「自定义指针图案」。',
+    filled: (name, size) => `已选择 ${name}（${bytes(size)}），会自动切到「自定义指针图案」。`
+  },
+  icon: {
+    empty: '没有选择图标，用的是默认图标。只接受 .ico（Windows 的图标容器）。',
+    filled: (name, size) => `已选择 ${name}（${bytes(size)}），编译时会写进 exe。`
+  }
+};
+
+const syncFileNote = (kind) => {
+  const ids = FILE_NOTE_IDS[kind];
+  const entry = state.files[kind];
+  const text = FILE_NOTE_TEXT[kind];
+  $(ids.note).textContent = entry ? text.filled(entry.name, entry.bytes) : text.empty;
+  $(ids.clear).hidden = !entry;
+  const modeGroup = kind === 'loadingImage' ? $('loadingImageModeGroup') : null;
+  if (modeGroup) modeGroup.classList.toggle('hidden', !entry);
+};
+
+const attachFile = (kind, entry) => {
+  state.files[kind] = entry;
+  syncFileNote(kind);
+};
+
+const handleImageInput = async (kind, input) => {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  try {
+    // Caught here as well as on the server: rc.exe would fail much later, with a
+    // message about the resource script rather than about this file.
+    if (kind === 'icon' && !/\.ico$/i.test(file.name)) {
+      throw new Error('程序图标必须是 .ico（Windows 的图标容器），不接受 png/jpeg');
+    }
+    const dataUrl = await readAsDataUrl(file);
+    if (!/^data:image\//i.test(dataUrl)) throw new Error('这不是图片');
+    attachFile(kind, {name: file.name, bytes: file.size, dataUrl});
+    // Picking a cursor image *is* choosing the custom cursor.
+    if (kind === 'cursorImage') {
+      const radio = document.querySelector('input[name="cursor"][value="custom"]');
+      if (radio) radio.checked = true;
+    }
+  } catch (error) {
+    say(`无法读取 ${file.name}：${error.message}`, 'error');
+  } finally {
+    input.value = '';
+  }
+};
+
+for (const [kind, ids] of Object.entries(FILE_NOTE_IDS)) {
+  $(ids.input).addEventListener('change', () => handleImageInput(kind, $(ids.input)));
+  $(ids.clear).addEventListener('click', () => {
+    attachFile(kind, null);
+    if (kind === 'cursorImage') {
+      const radio = document.querySelector('input[name="cursor"][value="auto"]');
+      if (radio) radio.checked = true;
+    }
+  });
+}
+
+// --- extensions ------------------------------------------------------------
+
+const renderExtensions = () => {
+  const list = $('extensionList');
+  list.innerHTML = '';
+  state.extensions.forEach((entry, index) => {
+    const item = document.createElement('li');
+    const name = document.createElement('span');
+    name.textContent = `${entry.name}（${bytes(entry.size || entry.source.length)}）`;
+    const remove = document.createElement('button');
+    remove.className = 'button dangerous';
+    remove.innerHTML = '<div class="dimmer"></div><div class="text">移除</div>';
+    remove.addEventListener('click', () => {
+      state.extensions.splice(index, 1);
+      renderExtensions();
+    });
+    item.append(name, remove);
+    list.append(item);
+  });
+  $('extensionNote').textContent = state.extensions.length
+    ? `已选 ${state.extensions.length} 个扩展，打包时会被烘进产物；识别不出对应 id 的会改为按顺序提前加载。`
+    : '还没有选择扩展。命令行可以用 --extension 传路径或 URL。';
+};
+
+$('extensionInput').addEventListener('change', async () => {
+  const files = Array.from($('extensionInput').files || []);
+  for (const file of files) {
+    try {
+      const source = await readAsText(file);
+      if (!source.trim()) throw new Error('文件是空的');
+      state.extensions.push({name: file.name, size: file.size, source});
+    } catch (error) {
+      say(`无法读取 ${file.name}：${error.message}`, 'error');
+    }
+  }
+  $('extensionInput').value = '';
+  renderExtensions();
+});
 
 // --- options ---------------------------------------------------------------
 // The DOM is the single source of truth: readOptions() is what goes over the
@@ -768,6 +1013,13 @@ const readOptions = () => {
     listColor: $('listColor').value,
 
     cursor: radioValue('cursor', 'auto'),
+    cursorCustom: state.files.cursorImage ? state.files.cursorImage.dataUrl : '',
+    cursorCenterX: num('cursorCenterX', 0),
+    cursorCenterY: num('cursorCenterY', 0),
+    pointerlock: $('pointerlock').checked,
+    gamepad: $('gamepad').checked,
+    specialCloudBehaviors: $('specialCloudBehaviors').checked,
+    unsafeCloudBehaviors: $('unsafeCloudBehaviors').checked,
     cloudMode: radioValue('cloudMode', 'off'),
     projectId: $('projectId').value.trim(),
 
@@ -783,8 +1035,16 @@ const readOptions = () => {
     optimizePng: $('optimizePng').checked,
     noDeflate: $('noDeflate').checked,
 
+    loadingImage: state.files.loadingImage ? state.files.loadingImage.dataUrl : '',
+    loadingImageMode: radioValue('loadingImageMode', 'normal'),
+
+    extensions: state.extensions.map((entry) => ({name: entry.name, source: entry.source})),
+
     width: num('width', 640),
     height: num('height', 480),
+    windowMode: $('windowMode').value,
+    icon: state.files.icon ? state.files.icon.dataUrl : '',
+    version: $('appVersion').value.trim(),
     devtools: $('devtools').checked,
     build: $('build').checked
   };
@@ -794,15 +1054,20 @@ const CHECKBOXES = [
   'turbo', 'interpolation', 'highQualityPen', 'closeWhenStopped',
   'autoplay', 'progressBar', 'controlGreenFlag', 'controlStopAll', 'controlPause',
   'controlFullscreen', 'editableLists', 'compilerEnabled', 'warpTimer',
-  'packagedRuntime', 'preload', 'optimizePng', 'noDeflate', 'devtools', 'build'
+  'packagedRuntime', 'preload', 'optimizePng', 'noDeflate', 'devtools', 'build',
+  'pointerlock', 'gamepad', 'specialCloudBehaviors', 'unsafeCloudBehaviors'
 ];
 
 const writeOptions = (incoming) => {
   const o = Object.assign({}, DEFAULTS, incoming || {});
 
-  pickRadio('target', o.target === 'exe' ? 'exe' : 'html', ['html', 'exe'], 'html');
+  pickRadio('target', ['html', 'zip', 'exe'].includes(o.target) ? o.target : 'html',
+    ['html', 'zip', 'exe'], 'html');
   pickRadio('resizeMode', o.resizeMode, ['preserve-ratio', 'stretch', 'dynamic-resize'], 'preserve-ratio');
-  pickRadio('cursor', o.cursor === 'none' ? 'none' : 'auto', ['auto', 'none'], 'auto');
+  pickRadio('cursor', o.cursor === 'none' ? 'none' : o.cursor === 'custom' ? 'custom' : 'auto',
+    ['auto', 'none', 'custom'], 'auto');
+  pickRadio('loadingImageMode', o.loadingImageMode === 'stretch' ? 'stretch' : 'normal',
+    ['normal', 'stretch'], 'normal');
   pickRadio('cloudMode', o.cloudMode === 'local' ? 'local' : 'off', ['off', 'local'], 'off');
 
   $('mode').value = o.mode === 'tw' ? 'tw' : 'fast';
@@ -815,6 +1080,10 @@ const writeOptions = (incoming) => {
   $('projectId').value = o.projectId == null ? '' : String(o.projectId);
   $('width').value = String(o.width);
   $('height').value = String(o.height);
+  $('windowMode').value = ['window', 'maximize', 'fullscreen'].includes(o.windowMode) ? o.windowMode : 'window';
+  $('appVersion').value = o.version == null ? '' : String(o.version);
+  $('cursorCenterX').value = String(Number(o.cursorCenterX) || 0);
+  $('cursorCenterY').value = String(Number(o.cursorCenterY) || 0);
 
   $('accent').value = colorValue(o.accent, DEFAULTS.accent);
   $('background').value = colorValue(o.background, DEFAULTS.background);
@@ -826,6 +1095,26 @@ const writeOptions = (incoming) => {
   $('customJS').value = o.customJS == null ? '' : String(o.customJS);
 
   for (const id of CHECKBOXES) $(id).checked = !!o[id];
+
+  // Files cannot come back from an options file as controls, but a data URL in
+  // the file is still a usable image, so 导入 keeps it.
+  const adopt = (kind, uri, name) => {
+    if (typeof uri === 'string' && /^data:image\//i.test(uri)) {
+      state.files[kind] = {name: name || kind, bytes: dataUrlBytes(uri), dataUrl: uri};
+    } else {
+      state.files[kind] = null;
+    }
+    syncFileNote(kind);
+  };
+  adopt('loadingImage', o.loadingImage, 'loading 图');
+  adopt('cursorImage', o.cursorCustom, '指针图');
+  adopt('icon', o.icon, 'app.ico');
+  if (Array.isArray(o.extensions)) {
+    state.extensions = o.extensions
+      .filter((entry) => entry && typeof entry.source === 'string')
+      .map((entry) => ({name: String(entry.name || 'extension.js'), source: entry.source}));
+    renderExtensions();
+  }
 
   // The three derived switches. `=== false` rather than `!` so that a file which
   // simply omits the key keeps the default instead of flipping it.
@@ -840,19 +1129,31 @@ const writeOptions = (incoming) => {
 const toQuery = () => {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(readOptions())) {
+    // Objects have no query-string spelling of their own.
+    if (key === 'extensions') {
+      if (value.length) params.set('extensions', JSON.stringify(value));
+      continue;
+    }
     params.set(key, value === true ? '1' : value === false ? '0' : String(value));
   }
   if (state.file) params.set('filename', state.file.name);
   return params;
 };
 
+const TARGET_NOTES = {
+  html: '产物是单个 .html 文件，双击即可在浏览器里运行，也可以直接挂到网站上。',
+  zip: '产物是一个 zip：index.html + project.json + assets/。素材各自一个文件，浏览器可以并行拉取并缓存，' +
+    '所以放到网站上比单文件版打开更快。注意它必须通过 http(s) 访问——双击打开（file://）时浏览器不允许 fetch 本地文件。',
+  exe: '宿主是 WebView2（Windows 10/11 自带），页面部分与 HTML 目标走同一条管线，产物实测比原始 sb3 还小。'
+};
+
 const syncTarget = () => {
-  const isExe = readOptions().target === 'exe';
+  const target = readOptions().target;
+  const isExe = target === 'exe';
   $('appSettings').classList.toggle('hidden', !isExe);
-  $('previewBtn').classList.toggle('hidden', isExe);
-  $('targetNote').textContent = isExe
-    ? '宿主是 WebView2（Windows 10/11 自带），页面部分与 HTML 目标走同一条管线，产物实测比原始 sb3 还小。'
-    : '产物是单个 .html 文件，双击即可在浏览器里运行，也可以直接挂到网站上。';
+  // Neither a zip nor an exe can be "run" from the status line.
+  $('previewBtn').classList.toggle('hidden', isExe || target === 'zip');
+  $('targetNote').textContent = TARGET_NOTES[target] || TARGET_NOTES.html;
 };
 
 document.addEventListener('change', (event) => {
@@ -901,6 +1202,15 @@ apiFetch('/api/health').then((r) => r.json()).then((health) => {
     ? '编译器已就位，勾选后会在本页直接编译出 exe（约几十秒）。'
     : '没有找到 MSVC，只能生成资源、无法在这里编译。资源会写进 <code>exe/build/</code>，' +
       '之后可以在仓库根目录手动运行 <code>exe\\build.cmd</code>。';
+
+  // Only relevant when it is missing: the pointer-lock / gamepad / cloud
+  // behaviour switches would then fail at pack time, so say so up front.
+  if (health.addons === false) {
+    $('addonsNote').innerHTML = '<strong>缺少 <code>vendor/scaffolding-addons.js</code></strong>：' +
+      '指针锁定、手柄、特殊云变量行为都用不了（勾了会打包失败）。' +
+      '从 <a href="https://packager.turbowarp.org/scaffolding/addons.js">packager.turbowarp.org</a> ' +
+      '下载后放进 <code>vendor/</code> 即可。';
+  }
 
   if (problems.length) {
     $('healthBody').innerHTML = problems.join('');
@@ -1068,16 +1378,32 @@ const packHtml = () => runWithStatus('打包中…', async () => {
   state.blobUrl = URL.createObjectURL(blob);
 
   const a = report.project || {};
+  const isZip = report.target === 'zip';
+  // A zip is not something a tab can run, so it gets one link; the HTML targets
+  // also get the "run it here" shortcut.
   setDownloads(
     `<a href="${state.blobUrl}" download="${escapeHtml(name)}">下载 ${escapeHtml(name)}</a>` +
-    `（${bytes(report.htmlBytes)}） · ` +
-    `<a href="${state.blobUrl}" target="_blank" rel="noopener">在新标签页运行</a>`
+    `（${bytes(isZip ? report.zipBytes : report.htmlBytes)}）` +
+    (isZip
+      ? ' · 解压后通过 http(s) 访问 <code>index.html</code>'
+      : ` · <a href="${state.blobUrl}" target="_blank" rel="noopener">在新标签页运行</a>`)
   );
 
-  addStat('产物', `${bytes(report.htmlBytes)}，占原始 sb3 的 ${pct(report.htmlBytes, a.originalBytes)}`);
+  addStat('产物', isZip
+    ? `ZIP ${bytes(report.zipBytes)}：index.html ${bytes(report.htmlBytes)} + ${report.entries - 2} 个素材文件`
+    : `${bytes(report.htmlBytes)}，占原始 sb3 的 ${pct(report.htmlBytes, a.originalBytes)}`);
   addStat('用时', elapsed(report.ms));
   addStat('作品', `${a.targetCount} 个角色 · ${a.assetCount} 个素材（${bytes(a.assetBytes)}）`);
   addStat('运行时', escapeHtml(report.scaffolding) + (a.usesMusic ? '（含 music 扩展）' : ''));
+  if (a.bakedExtensions && a.bakedExtensions.length) {
+    addStat('扩展烘入', a.bakedExtensions
+      .map((e) => `${escapeHtml(e.name)} → <code>${escapeHtml(e.id || '按顺序加载')}</code>`)
+      .join(' · '));
+  }
+  if (a.remoteExtensions && a.remoteExtensions.length) {
+    addStat('仍需联网', `<span class="bad">${escapeHtml(a.remoteExtensions.join(' · '))}</span>` +
+      '<span class="muted">（在「自定义扩展」里补上源码）</span>');
+  }
   addStat('PNG 重压', a.png && a.png.optimized
     ? `${a.png.optimized} 张无损重编码，${bytes(a.png.before)} → ${bytes(a.png.after)}` +
       `（<span class="ok">省 ${bytes(a.png.before - a.png.after)}</span>）`
@@ -1086,7 +1412,7 @@ const packHtml = () => runWithStatus('打包中…', async () => {
     addStat('容器', `载荷 ${bytes(report.container.payloadBytes)}` +
       `（${report.container.assetsDeflated} 压缩 / ${report.container.assetsRaw} 原样，省 ${bytes(report.container.deflatedBytesSaved)}）`);
   }
-  addStat('数据块', `${report.chunks} 块`);
+  if (!isZip) addStat('数据块', `${report.chunks} 块`);
   $('statsWrap').classList.remove('hidden');
 
   say('打包完成');

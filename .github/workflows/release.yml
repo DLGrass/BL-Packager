@@ -29,7 +29,7 @@ jobs:
     name: verify the tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Fetch the runtime scripts that are not redistributed here
         shell: bash
@@ -44,10 +44,10 @@ jobs:
           "$GITHUB_WORKSPACE/../_ref/turbowarp-packager"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -79,7 +79,7 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `git archive` rather than a hand-rolled zip: it takes exactly the files
       # in the tag's tree (so no node_modules, no vendor/, no out/) and applies
@@ -94,7 +94,7 @@ jobs:
           sha256sum "$NAME.zip" | tee SHA256SUMS.txt
 
       - name: Upload the archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-files
           path: |
@@ -109,14 +109,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-files
 
       # v2 is the maintained major of softprops/action-gh-release; it needs
       # `contents: write`, which is granted above and nowhere else.
       - name: Create the Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             bl-packager-*.zip
